@@ -9,9 +9,12 @@ Built for AI-accelerated software delivery in regulated environments
 (pensions, insurance, financial services). Brand-matched to Teamsmiths Deputee.ai.
 """
 
+import base64
 import json
 import os
+import re
 
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from openai import OpenAI
@@ -499,12 +502,18 @@ def page_intro():
                 f'</div>',
                 unsafe_allow_html=True,
             )
-            if status == "live":
-                if st.button(btn_label, key=f"mode_btn_{i}", type="primary", use_container_width=True):
+            if tag == "PROPOSE":
+                if st.button("Open  ->", key=f"mode_btn_{i}", type="primary", use_container_width=True):
                     st.session_state.page = "workbench"
                     st.rerun()
-            else:
-                st.button(btn_label, key=f"mode_btn_{i}", disabled=True, use_container_width=True)
+            elif tag == "START":
+                if st.button("Start a project  ->", key=f"mode_btn_{i}", type="primary", use_container_width=True):
+                    st.session_state.page = "start"
+                    st.rerun()
+            elif tag == "ADD":
+                if st.button("Load a project  ->", key=f"mode_btn_{i}", type="primary", use_container_width=True):
+                    st.session_state.page = "add"
+                    st.rerun()
 
     st.markdown('<h2 class="ts-section-h2">Why INVEST &rarr; Gherkin?</h2>', unsafe_allow_html=True)
     st.markdown(
@@ -557,6 +566,28 @@ def stage_header(num: str, title: str):
     )
 
 
+def _with_project_context(user_msg):
+    """If project_context is set, prepend a domain primer so the model is anchored."""
+    ctx = st.session_state.get("project_context")
+    if not ctx:
+        return user_msg
+    lines = ["[Project context]"]
+    for k, label in [
+        ("name", "Project"),
+        ("domain", "Domain"),
+        ("regulatory_references", "Regulatory references"),
+        ("glossary", "Glossary"),
+        ("stakeholders", "Stakeholders"),
+        ("success_metric", "Success metric"),
+    ]:
+        v = ctx.get(k)
+        if v:
+            lines.append(f"{label}: {v}")
+    lines.append("Use this context to sharpen INVEST candidate answers and Gherkin terminology.")
+    lines.append("")
+    return "\n".join(lines) + "\n" + user_msg
+
+
 def page_workbench():
     render_topbar("workbench")
 
@@ -585,7 +616,7 @@ def page_workbench():
         try:
             st.session_state.invest_result = call_openai_structured(
                 client, INVEST_SYSTEM_PROMPT,
-                f"Critique this requirement:\n\n{st.session_state.raw_requirement}",
+                _with_project_context(f"Critique this requirement:\n\n{st.session_state.raw_requirement}"),
                 INVEST_SCHEMA, model="gpt-5.4-mini", status_placeholder=progress,
             )
             st.session_state.final_artifacts = None
@@ -742,7 +773,7 @@ def page_workbench():
                 return f"Q: {q}\nA: {ans}\nSource: PO free-text override"
 
             block = "\n\n".join(_fmt_answer(q, a) for q, a in answers.items())
-            user_message = (
+            user_message = _with_project_context(
                 f"Original requirement:\n{st.session_state.raw_requirement}\n\n"
                 f"INVEST critique noted:\n"
                 f"- Domain ambiguities: {'; '.join(result['domain_ambiguities']) or 'none'}\n"
@@ -817,7 +848,246 @@ def page_workbench():
             st.caption("Copy-paste ready for Jira / Azure DevOps / Confluence / Notion.")
 
 
+# ============================================================
+# GitHub helpers (used by START / ADD)
+# ============================================================
+GH_API = "https://api.github.com"
+
+
+def _github_token():
+    return os.environ.get("GITHUB_TOKEN", "").strip()
+
+
+def _gh_headers():
+    tok = _github_token()
+    h = {"Accept": "application/vnd.github+json"}
+    if tok:
+        h["Authorization"] = f"Bearer {tok}"
+    return h
+
+
+def github_create_repo(name, description, private=False):
+    r = requests.post(
+        f"{GH_API}/user/repos",
+        headers=_gh_headers(),
+        json={"name": name, "description": description, "private": private, "auto_init": False},
+        timeout=20,
+    )
+    if r.status_code in (200, 201):
+        return r.json()
+    raise RuntimeError(f"Create repo failed ({r.status_code}): {r.text[:300]}")
+
+
+def github_put_file(owner, repo, path, content, message):
+    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    r = requests.put(
+        f"{GH_API}/repos/{owner}/{repo}/contents/{path}",
+        headers=_gh_headers(),
+        json={"message": message, "content": encoded},
+        timeout=20,
+    )
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"Put {path} failed ({r.status_code}): {r.text[:300]}")
+
+
+def github_get_file(owner, repo, path):
+    h = _gh_headers()
+    h["Accept"] = "application/vnd.github.raw"
+    r = requests.get(f"{GH_API}/repos/{owner}/{repo}/contents/{path}", headers=h, timeout=15)
+    return r.text if r.status_code == 200 else None
+
+
+def _parse_repo_url(url):
+    m = re.search(r"github\.com[/:]([^/]+)/([^/\s]+?)(?:\.git)?(?:/|$)", url.strip())
+    return (m.group(1), m.group(2)) if m else None
+
+
+# ============================================================
+# Page: START
+# ============================================================
+def page_start():
+    render_topbar("workbench")
+    st.markdown('<h1 class="ts-hero-h1" style="font-size:36px;">START — new project</h1>', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="ts-hero-body">Capture project context, create a GitHub repo with templated structure, optionally hand off to Lovable or Replit. Context primes every refinement that follows.</p>',
+        unsafe_allow_html=True,
+    )
+
+    if not _github_token():
+        st.error("GITHUB_TOKEN not configured. Add it to Replit Secrets to enable repo creation.")
+
+    with st.form("start_form", clear_on_submit=False):
+        name = st.text_input("Project name (becomes the GitHub repo name)", placeholder="acme-pensions-modernisation")
+        c1, c2 = st.columns(2)
+        with c1:
+            domain = st.text_area("Domain / industry context", height=110, placeholder="UK pensions under TPR; auto-enrolment, drawdown…")
+        with c2:
+            regulatory = st.text_area("Regulatory references (one per line)", height=110, placeholder="Pensions Act 2008\nTPR Detailed Guidance No. 3\nFCA COBS 19")
+        glossary = st.text_area(
+            "Glossary terms (one per line, format: term — definition)",
+            height=110,
+            placeholder="Eligible jobholder — age ≥22 and <SPA, qualifying earnings ≥ trigger\nQualifying earnings — band £6,240–£50,270 (24/25)",
+        )
+        c3, c4 = st.columns(2)
+        with c3:
+            stakeholders = st.text_input("Stakeholders / SMEs", placeholder="Pensions PM (Jane Doe), Payroll lead, Compliance…")
+        with c4:
+            success_metric = st.text_input("Success metric", placeholder="Zero TPR enforcement actions in 12 months post-launch")
+        c5, c6 = st.columns([2, 1])
+        with c5:
+            runtime = st.radio("Runtime handoff", ["None (just create the repo)", "Replit", "Lovable"], horizontal=True)
+        with c6:
+            private = st.checkbox("Make repo private", value=False)
+        submitted = st.form_submit_button("Create GitHub repo  →", type="primary", use_container_width=True)
+
+    if submitted:
+        if not _github_token():
+            st.stop()
+        nm = name.strip()
+        if not nm:
+            st.error("Project name required.")
+            st.stop()
+        progress = st.empty()
+        try:
+            progress.caption("⏳ Creating GitHub repo…")
+            repo = github_create_repo(nm, description=f"Project: {nm}", private=private)
+            owner = repo["owner"]["login"]
+            url = repo["html_url"]
+
+            project = {
+                "name": nm,
+                "domain": domain.strip(),
+                "regulatory_references": regulatory.strip(),
+                "glossary": glossary.strip(),
+                "stakeholders": stakeholders.strip(),
+                "success_metric": success_metric.strip(),
+                "runtime": runtime,
+            }
+
+            progress.caption("⏳ Pushing /context/project.json…")
+            github_put_file(owner, nm, "context/project.json", json.dumps(project, indent=2), "chore: project context")
+
+            progress.caption("⏳ Pushing README + glossary…")
+            readme = (
+                f"# {nm}\n\n"
+                f"**Domain:** {domain.strip()}\n\n"
+                f"## Regulatory references\n{regulatory.strip()}\n\n"
+                f"## Stakeholders\n{stakeholders.strip()}\n\n"
+                f"## Success metric\n{success_metric.strip()}\n"
+            )
+            github_put_file(owner, nm, "README.md", readme, "chore: README")
+
+            lines = ["# Glossary", ""]
+            for line in glossary.splitlines():
+                if "—" in line:
+                    term, _, defn = line.partition("—")
+                    lines.append(f"- **{term.strip()}** — {defn.strip()}")
+            glossary_md = "\n".join(lines) if len(lines) > 2 else "# Glossary\n\n(None yet.)"
+            github_put_file(owner, nm, "docs/glossary.md", glossary_md, "chore: glossary")
+
+            github_put_file(owner, nm, "features/.gitkeep", "", "chore: features placeholder")
+
+            st.session_state.project_context = {"owner": owner, "name": nm, "url": url, **project}
+            progress.empty()
+            st.success(f"✓ Repo created: {url}")
+        except Exception as e:  # noqa: BLE001
+            progress.empty()
+            st.error(f"Failed: {e}")
+
+    if st.session_state.project_context:
+        ctx = st.session_state.project_context
+        st.markdown(
+            f'<div class="ts-card" style="margin:16px 0;">'
+            f'<div class="ts-card-title">Project context loaded</div>'
+            f'<div class="ts-card-body">'
+            f"<strong>{ctx.get('name')}</strong>"
+            f" · <a href=\"{ctx.get('url', '#')}\" target=\"_blank\" style=\"color:var(--primary);\">{ctx.get('url', '')}</a><br>"
+            f"<em>Domain:</em> {ctx.get('domain', '(none)')}"
+            f"</div></div>",
+            unsafe_allow_html=True,
+        )
+        cols = st.columns([1.5, 1.5, 1, 5])
+        with cols[0]:
+            if st.button("Continue to workbench →", type="primary", key="start_to_wb"):
+                st.session_state.page = "workbench"
+                st.rerun()
+        with cols[1]:
+            rt = ctx.get("runtime", "")
+            o, n = ctx.get("owner"), ctx.get("name")
+            if rt == "Replit" and o and n:
+                st.link_button("Import to Replit ↗", f"https://replit.com/github/{o}/{n}")
+            elif rt == "Lovable" and o and n:
+                st.link_button("Import to Lovable ↗", f"https://lovable.dev/?import={o}/{n}")
+        with cols[2]:
+            if st.button("← Back", key="start_back"):
+                st.session_state.page = "intro"
+                st.rerun()
+
+
+# ============================================================
+# Page: ADD
+# ============================================================
+def page_add():
+    render_topbar("workbench")
+    st.markdown('<h1 class="ts-hero-h1" style="font-size:36px;">ADD — feature to existing project</h1>', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="ts-hero-body">Pulls <code>context/project.json</code> from the GitHub repo. Loaded context primes INVEST critique and Gherkin generation thereafter.</p>',
+        unsafe_allow_html=True,
+    )
+
+    if not _github_token():
+        st.caption("Public repos work without a token. Private repos require GITHUB_TOKEN in Secrets.")
+
+    repo_url = st.text_input("GitHub repo URL", placeholder="https://github.com/segunosu/acme-pensions-modernisation", key="add_url")
+    c1, c2 = st.columns([1, 5])
+    with c1:
+        load = st.button("Load context →", type="primary", use_container_width=True)
+    with c2:
+        if st.button("← Back to intro", key="add_back"):
+            st.session_state.page = "intro"
+            st.rerun()
+
+    if load:
+        parsed = _parse_repo_url(repo_url or "")
+        if not parsed:
+            st.error("Couldn't parse owner/name from URL.")
+            st.stop()
+        owner, name = parsed
+        progress = st.empty()
+        progress.caption(f"⏳ Fetching {owner}/{name}/context/project.json…")
+        try:
+            content = github_get_file(owner, name, "context/project.json")
+            progress.empty()
+            if not content:
+                st.error(f"No context/project.json in {owner}/{name}. Was the project created via START? Private repos need GITHUB_TOKEN.")
+                st.stop()
+            project = json.loads(content)
+            st.session_state.project_context = {"owner": owner, "name": name, "url": f"https://github.com/{owner}/{name}", **project}
+            st.success(f"✓ Loaded: {project.get('name', name)}")
+        except Exception as e:  # noqa: BLE001
+            progress.empty()
+            st.error(f"Failed: {e}")
+
+    if st.session_state.project_context:
+        ctx = st.session_state.project_context
+        st.markdown(
+            f'<div class="ts-card" style="margin:16px 0;">'
+            f'<div class="ts-card-title">Project context loaded</div>'
+            f'<div class="ts-card-body"><strong>{ctx.get("name")}</strong><br><em>Domain:</em> {ctx.get("domain", "(none)")}</div>'
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("Continue to workbench →", type="primary", key="add_to_wb"):
+            st.session_state.page = "workbench"
+            st.rerun()
+
+
+
 if st.session_state.page == "intro":
     page_intro()
+elif st.session_state.page == "start":
+    page_start()
+elif st.session_state.page == "add":
+    page_add()
 else:
     page_workbench()
