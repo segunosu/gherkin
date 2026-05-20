@@ -441,8 +441,50 @@ def verdict_pill(verdict: str) -> str:
     return f"<span class='v-pill {cls}'>{verdict}</span>"
 
 
+
+def _render_user_strip():
+    cu = st.session_state.get("current_user")
+    cols = st.columns([4, 1, 1, 1])
+    with cols[0]:
+        if cu:
+            badge = "Admin" if _is_admin(cu) else ("Approved" if _is_approved(cu) else "Pending")
+            st.markdown(
+                f'<div style="font-size:12px;color:var(--fg-muted);margin:-12px 0 18px 0;">'
+                f'Signed in as <strong style="color:var(--fg);">{cu}</strong> '
+                f'<span class="v-pill v-pass" style="margin-left:6px;font-size:10px;">{badge}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div style="font-size:12px;color:var(--fg-muted);margin:-12px 0 18px 0;">'
+                'Not signed in. Token-consuming actions require admin-approved access.'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+    with cols[1]:
+        if cu:
+            if st.button("Sign out", key="sign_out", use_container_width=True):
+                st.session_state.current_user = None
+                st.rerun()
+        else:
+            if st.button("Sign in", key="sign_in", use_container_width=True):
+                st.session_state.page = "login"
+                st.rerun()
+    with cols[2]:
+        if not cu:
+            if st.button("Register", key="sign_register", use_container_width=True):
+                st.session_state.page = "register"
+                st.rerun()
+        elif _is_admin(cu):
+            if st.button("Admin", key="admin_link", use_container_width=True):
+                st.session_state.page = "admin"
+                st.rerun()
+
+
 def page_intro():
     render_topbar("intro")
+    _render_user_strip()
     st.markdown(
         '<div class="ts-hero">'
         '<div class="ts-hero-label">INVEST &rarr; Gherkin Pipeline</div>'
@@ -657,8 +699,9 @@ cp.addEventListener('click',()=>{navigator.clipboard.writeText(out.textContent.t
         run_invest = st.button("▶ Run INVEST critique", type="primary", use_container_width=True)
 
     if run_invest:
+        require_approved("invest")
         client = get_client()
-        progress = st.empty(); progress.caption("⏳ Critiquing against INVEST…")
+        progress = st.empty(); progress.caption("⏳ Critiquing against INVEST… (uses OpenAI tokens)")
         try:
             st.session_state.invest_result = call_openai_structured(
                 client, INVEST_SYSTEM_PROMPT,
@@ -800,6 +843,7 @@ cp.addEventListener('click',()=>{navigator.clipboard.writeText(out.textContent.t
         st.session_state.clarification_answers = answers
 
         if st.button("Generate story + AC + Gherkin →", type="primary", use_container_width=True):
+            require_approved("generate")
             client = get_client()
             def _fmt_answer(q, rec):
                 if not isinstance(rec, dict):
@@ -886,6 +930,7 @@ cp.addEventListener('click',()=>{navigator.clipboard.writeText(out.textContent.t
             st.session_state["test_engine"] = engine
 
             if st.button("Generate test plan", type="primary", key="gen_test_plan"):
+                require_approved("testplan")
                 client = get_client()
                 tp_progress = st.empty()
                 tp_progress.caption("⏳ Drafting test plan…")
@@ -1042,6 +1087,7 @@ def page_start():
         submitted = st.form_submit_button("Create GitHub repo  →", type="primary", use_container_width=True)
 
     if submitted:
+        require_approved("start")
         if not _github_token():
             st.stop()
         nm = name.strip()
@@ -1050,7 +1096,7 @@ def page_start():
             st.stop()
         progress = st.empty()
         try:
-            progress.caption("⏳ Creating GitHub repo…")
+            progress.caption("⏳ Creating GitHub repo… (uses OpenAI tokens for arch advisory)")
             repo = github_create_repo(nm, description=f"Project: {nm}", private=private)
             owner = repo["owner"]["login"]
             url = repo["html_url"]
@@ -1301,6 +1347,222 @@ def page_workspace():
             st.rerun()
 
 
+# ============================================================
+# Access gate (MVP) — email + admin-approval, persisted in Replit DB
+# ============================================================
+from datetime import datetime as _dt
+
+ADMIN_EMAIL = "segun.osu@teamsmiths.com"
+
+# Replit DB if available, else in-memory fallback (for local dev)
+try:
+    from replit import db as _user_db  # type: ignore
+    _USE_REPLIT_DB = True
+except Exception:  # noqa: BLE001
+    _user_db = {}
+    _USE_REPLIT_DB = False
+
+
+def _user_key(email):
+    return f"user:{(email or '').lower().strip()}"
+
+
+def _get_user(email):
+    if not email:
+        return None
+    k = _user_key(email)
+    raw = _user_db.get(k)
+    if not raw:
+        return None
+    if isinstance(raw, (str, bytes)):
+        try:
+            return json.loads(raw)
+        except Exception:  # noqa: BLE001
+            return None
+    return dict(raw)
+
+
+def _set_user(email, data):
+    k = _user_key(email)
+    payload = json.dumps(data) if _USE_REPLIT_DB else data
+    _user_db[k] = payload
+
+
+def _list_users():
+    items = []
+    if _USE_REPLIT_DB:
+        for k in list(_user_db.keys()):
+            if k.startswith("user:"):
+                u = _get_user(k.split(":", 1)[1])
+                if u:
+                    items.append(u)
+    else:
+        for k, v in _user_db.items():
+            if k.startswith("user:") and isinstance(v, dict):
+                items.append(v)
+    items.sort(key=lambda u: u.get("registered_at", ""), reverse=True)
+    return items
+
+
+def _is_admin(email):
+    return bool(email) and email.lower().strip() == ADMIN_EMAIL.lower()
+
+
+def _is_approved(email):
+    u = _get_user(email)
+    return bool(u and u.get("status") == "approved") or _is_admin(email)
+
+
+def require_approved(scope_key):
+    """Gate a token-consuming action. Call inline before the OpenAI call."""
+    cu = st.session_state.get("current_user")
+    if _is_approved(cu):
+        return True
+    st.warning(
+        "🔒 This action calls OpenAI and consumes tokens (typically a few cents). "
+        "Sign in with an approved account before continuing."
+    )
+    c1, c2, c3 = st.columns([1, 1, 5])
+    with c1:
+        if st.button("Sign in", key=f"signin_{scope_key}"):
+            st.session_state.page = "login"
+            st.rerun()
+    with c2:
+        if st.button("Register", key=f"register_{scope_key}"):
+            st.session_state.page = "register"
+            st.rerun()
+    st.stop()
+
+
+def page_register():
+    render_topbar("workbench")
+    st.markdown('<h1 class="ts-hero-h1" style="font-size:36px;">Request access</h1>', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="ts-hero-body">Access lets you run INVEST critiques, generate Gherkin artifacts, and create projects. '
+        'Each action calls OpenAI and costs a few cents per request. The admin reviews requests before approving.</p>',
+        unsafe_allow_html=True,
+    )
+
+    with st.form("register_form", clear_on_submit=False):
+        email = st.text_input("Email")
+        name = st.text_input("Your name")
+        reason = st.text_area("What will you use it for?", height=80, placeholder="Short note on intended use.")
+        submitted = st.form_submit_button("Submit request →", type="primary", use_container_width=True)
+
+    if submitted:
+        if not email or "@" not in email:
+            st.error("Provide a valid email address.")
+            st.stop()
+        existing = _get_user(email)
+        auto = _is_admin(email)
+        record = {
+            "email": email.lower().strip(),
+            "name": name.strip(),
+            "reason": reason.strip(),
+            "status": "approved" if auto else (existing.get("status") if existing else "pending"),
+            "registered_at": (existing.get("registered_at") if existing else _dt.utcnow().isoformat()),
+            "last_seen": _dt.utcnow().isoformat(),
+        }
+        _set_user(email, record)
+        if auto:
+            st.session_state.current_user = email.lower().strip()
+            st.success("Admin account — auto-approved. You can use the workbench now.")
+        else:
+            st.success("Request submitted. You'll be able to sign in once the admin approves it.")
+
+    if st.button("← Back to intro", key="reg_back"):
+        st.session_state.page = "intro"
+        st.rerun()
+
+
+def page_login():
+    render_topbar("workbench")
+    st.markdown('<h1 class="ts-hero-h1" style="font-size:36px;">Sign in</h1>', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="ts-hero-body">Enter your approved email. (Lightweight MVP gate — '
+        'real auth with magic-links is a follow-up.)</p>',
+        unsafe_allow_html=True,
+    )
+    with st.form("login_form"):
+        email = st.text_input("Email")
+        submitted = st.form_submit_button("Sign in →", type="primary", use_container_width=True)
+    if submitted:
+        e = (email or "").strip().lower()
+        if _is_admin(e):
+            # Auto-create + approve admin if not already
+            existing = _get_user(e) or {}
+            existing.update({"email": e, "status": "approved", "name": existing.get("name") or "Admin",
+                             "registered_at": existing.get("registered_at") or _dt.utcnow().isoformat(),
+                             "last_seen": _dt.utcnow().isoformat()})
+            _set_user(e, existing)
+            st.session_state.current_user = e
+            st.success("Signed in as admin.")
+            st.session_state.page = "intro"
+            st.rerun()
+        u = _get_user(e)
+        if not u:
+            st.error("No account for that email. Please register.")
+            st.stop()
+        if u.get("status") != "approved":
+            st.warning(f"Account is **{u.get('status', 'unknown')}**. Awaiting admin approval.")
+            st.stop()
+        u["last_seen"] = _dt.utcnow().isoformat()
+        _set_user(e, u)
+        st.session_state.current_user = e
+        st.success(f"Signed in as {e}.")
+        st.session_state.page = "intro"
+        st.rerun()
+    if st.button("← Back to intro", key="login_back"):
+        st.session_state.page = "intro"
+        st.rerun()
+
+
+def page_admin():
+    render_topbar("workbench")
+    cu = st.session_state.get("current_user")
+    if not _is_admin(cu):
+        st.error("Admin only.")
+        if st.button("← Back", key="admin_back_no"):
+            st.session_state.page = "intro"
+            st.rerun()
+        return
+    st.markdown('<h1 class="ts-hero-h1" style="font-size:36px;">Admin — users</h1>', unsafe_allow_html=True)
+    users = _list_users()
+    pending = [u for u in users if u.get("status") == "pending"]
+    if pending:
+        st.markdown(f"#### Pending ({len(pending)})")
+        for u in pending:
+            with st.container():
+                st.markdown(f'<div class="ts-card" style="margin-bottom:8px;">'
+                            f'<strong>{u["email"]}</strong> — {u.get("name", "")}<br>'
+                            f'<span style="color:var(--fg-muted);font-size:13px;">{u.get("reason", "(no reason)")}</span><br>'
+                            f'<span style="color:var(--fg-muted);font-size:11px;">requested {u.get("registered_at", "")[:19]}</span>'
+                            f'</div>', unsafe_allow_html=True)
+                c1, c2, _ = st.columns([1, 1, 4])
+                with c1:
+                    if st.button("Approve", key=f"appr_{u['email']}", type="primary"):
+                        u["status"] = "approved"
+                        _set_user(u["email"], u)
+                        st.rerun()
+                with c2:
+                    if st.button("Deny", key=f"deny_{u['email']}"):
+                        u["status"] = "denied"
+                        _set_user(u["email"], u)
+                        st.rerun()
+
+    st.markdown(f"#### All users ({len(users)})")
+    for u in users:
+        badge = {"approved": "v-pass", "pending": "v-partial", "denied": "v-fail"}.get(u.get("status", ""), "v-partial")
+        st.markdown(f'<div style="margin:8px 0;font-size:13px;">'
+                    f'<span class="v-pill {badge}">{u.get("status", "?")}</span> '
+                    f'<strong>{u["email"]}</strong> · {u.get("name", "")} · '
+                    f'last seen {u.get("last_seen", "—")[:19]}</div>', unsafe_allow_html=True)
+
+    if st.button("← Back to intro", key="admin_back"):
+        st.session_state.page = "intro"
+        st.rerun()
+
+
 
 if st.session_state.page == "intro":
     page_intro()
@@ -1310,5 +1572,11 @@ elif st.session_state.page == "add":
     page_add()
 elif st.session_state.page == "workspace":
     page_workspace()
+elif st.session_state.page == "register":
+    page_register()
+elif st.session_state.page == "login":
+    page_login()
+elif st.session_state.page == "admin":
+    page_admin()
 else:
     page_workbench()
