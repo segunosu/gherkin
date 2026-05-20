@@ -278,7 +278,15 @@ For each criterion, return PASS, PARTIAL, or FAIL with a specific reason. Quote 
 
 Then surface domain ambiguities: undefined terminology, missing thresholds, regulatory references that should be cited, timing/boundary cases that aren't handled, or reference data not specified.
 
-Then generate clarifying questions the PO should put to the SME. Be specific - vague questions get vague answers.
+Then generate clarifying questions the PO should put to the SME. Be specific - vague questions get vague answers. For EACH clarifying question, also produce:
+  - why_it_matters: one short line describing which downstream artifact (AC, Gherkin scenarios, traceability) is steered by the answer
+  - candidate_answers: 3 to 5 ranked candidate answers, ordered most-likely-correct first. Each candidate must include:
+      * answer: the candidate answer itself, written as the PO would write it
+      * rationale: 1-2 sentences on why this is a reasonable answer in the relevant domain
+      * tradeoff: what this answer makes harder or constrains later
+      * assumption: what this answer takes for granted about the domain or data
+      * downstream_impact: which specific AC field, Gherkin scenario, or traceability item this answer will set
+      * industry_norm: "standard" (TPR/equivalent-regulator default), "common" (frequent variant), or "non_standard" (deliberate departure)
 
 If the story bundles multiple concerns, propose a split (separate stories named with crisp titles).
 
@@ -432,9 +440,10 @@ def page_intro():
         unsafe_allow_html=True,
     )
 
+    # Primary CTA + pensions example
     cta_cols = st.columns([1.4, 1.6, 5])
     with cta_cols[0]:
-        if st.button("Open Workbench  →", type="primary", use_container_width=True, key="hero_cta_1"):
+        if st.button("Propose a raw requirement  →", type="primary", use_container_width=True, key="hero_cta_1"):
             st.session_state.page = "workbench"
             st.rerun()
     with cta_cols[1]:
@@ -444,6 +453,58 @@ def page_intro():
             st.session_state.final_artifacts = None
             st.session_state.page = "workbench"
             st.rerun()
+
+    # Three project-mode options below the hero
+    st.markdown("<div style='height:32px;'></div>", unsafe_allow_html=True)
+    st.markdown('<h2 class="ts-section-h2">Or pick a project mode</h2>', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="ts-section-sub">PROPOSE is the public demo path. START and ADD are private utilities '
+        '(orchestrating GitHub repos + Lovable/Replit scaffolds) for getting projects off the ground.</p>',
+        unsafe_allow_html=True,
+    )
+
+    mode_cols = st.columns(3)
+    mode_cards = [
+        (
+            "PROPOSE",
+            "Raw business requirement",
+            "Paste a messy requirement. Get INVEST critique with ranked candidate answers, then Gherkin + traceability. This is the live demo path.",
+            "Open  →",
+            "live",
+        ),
+        (
+            "START",
+            "New project",
+            "Capture domain, glossary, regulatory references, success metrics. Tool creates the GitHub repo and offers one-click handoff to Lovable or Replit. Project context primes every subsequent refinement.",
+            "Coming soon",
+            "stub",
+        ),
+        (
+            "ADD",
+            "Feature to existing project",
+            "Pull project context from GitHub (README, glossary, prior .feature files). The PROPOSE flow then runs with that context injected, so candidate answers and Gherkin stay consistent with the codebase.",
+            "Coming soon",
+            "stub",
+        ),
+    ]
+    for i, (tag, title, body, btn_label, status) in enumerate(mode_cards):
+        with mode_cols[i]:
+            st.markdown(
+                f'<div class="ts-card" style="display:flex;flex-direction:column;min-height:240px;">'
+                f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">'
+                f'<span class="v-pill v-pass" style="font-size:10px;">{tag}</span>'
+                f'</div>'
+                f'<div class="ts-card-title">{title}</div>'
+                f'<div class="ts-card-body" style="flex:1;">{body}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            if status == "live":
+                if st.button(btn_label, key=f"mode_btn_{i}", type="primary", use_container_width=True):
+                    st.session_state.page = "workbench"
+                    st.rerun()
+            else:
+                st.button(btn_label, key=f"mode_btn_{i}", disabled=True, use_container_width=True)
 
     st.markdown('<h2 class="ts-section-h2">Why INVEST &rarr; Gherkin?</h2>', unsafe_allow_html=True)
     st.markdown(
@@ -577,20 +638,110 @@ def page_workbench():
                 st.markdown(result["split_recommendation"])
 
         stage_header("03", "SME clarifications")
-        st.caption("Answer what you can. Blanks are OK - the tool will assume and flag under Assumptions.")
+        st.caption("Each question carries 3-5 ranked candidate answers with reasoning. Pick one or type your own.")
+
+        CUSTOM_LABEL = "✎ Type your own…"
+        NORM_BADGES = {
+            "standard": ("TPR-standard", "v-pass"),
+            "common": ("common variant", "v-partial"),
+            "non_standard": ("non-standard", "v-fail"),
+        }
 
         answers = {}
-        for i, q in enumerate(result["clarifying_questions"]):
-            prior = st.session_state.clarification_answers.get(q, "")
-            answers[q] = st.text_area(f"**Q{i + 1}.** {q}", value=prior, key=f"clar_{i}", height=70)
+        for i, q_obj in enumerate(result["clarifying_questions"]):
+            q_text = q_obj["question"]
+            candidates = q_obj["candidate_answers"]
+
+            st.markdown(f"**Q{i + 1}.** {q_text}")
+            if q_obj.get("why_it_matters"):
+                st.markdown(
+                    f"<div style='color:var(--fg-muted);font-size:12px;margin:-4px 0 8px 0;'>"
+                    f"<em>Why this matters:</em> {q_obj['why_it_matters']}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # Radio: numbered options for candidates + custom
+            opt_labels = [f"{j + 1}. {c['answer']}" for j, c in enumerate(candidates)]
+            opt_labels.append(CUSTOM_LABEL)
+
+            prior = st.session_state.clarification_answers.get(q_text, {})
+            prior_idx = prior.get("source_idx", 0) if isinstance(prior, dict) else 0
+            if prior_idx >= len(opt_labels):
+                prior_idx = 0
+
+            choice = st.radio(
+                f"answer_{i}",
+                opt_labels,
+                index=prior_idx,
+                key=f"clar_radio_{i}",
+                label_visibility="collapsed",
+            )
+            chosen_idx = opt_labels.index(choice)
+
+            # Show the supporting card for the selected candidate
+            if chosen_idx < len(candidates):
+                c = candidates[chosen_idx]
+                norm_label, norm_cls = NORM_BADGES.get(c.get("industry_norm", "common"), ("common variant", "v-partial"))
+                st.markdown(
+                    f"""<div style='background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px 18px;margin:4px 0 12px 0;'>
+<div style='margin-bottom:8px;'><span class='v-pill {norm_cls}'>{norm_label}</span></div>
+<div style='font-size:13px;color:var(--fg);line-height:1.55;'>
+  <div style='margin-bottom:6px;'><strong style='color:var(--fg-muted);'>Why:</strong> {c['rationale']}</div>
+  <div style='margin-bottom:6px;'><strong style='color:var(--fg-muted);'>Tradeoff:</strong> {c['tradeoff']}</div>
+  <div style='margin-bottom:6px;'><strong style='color:var(--fg-muted);'>Assumption:</strong> {c['assumption']}</div>
+  <div><strong style='color:var(--fg-muted);'>Downstream impact:</strong> {c['downstream_impact']}</div>
+</div>
+</div>""",
+                    unsafe_allow_html=True,
+                )
+                answers[q_text] = {
+                    "answer": c["answer"],
+                    "source": "ai_candidate",
+                    "source_idx": chosen_idx,
+                    "candidate_meta": c,
+                }
+            else:
+                # Custom override
+                prior_custom = prior.get("answer", "") if isinstance(prior, dict) and prior.get("source") == "custom" else ""
+                custom = st.text_area(
+                    f"Type your answer for Q{i + 1}",
+                    value=prior_custom,
+                    key=f"clar_custom_{i}",
+                    height=70,
+                    label_visibility="collapsed",
+                    placeholder="Type your own answer here…",
+                )
+                answers[q_text] = {
+                    "answer": custom,
+                    "source": "custom",
+                    "source_idx": chosen_idx,
+                    "candidate_meta": None,
+                }
+
+            st.markdown("<div style='margin-bottom:8px;'></div>", unsafe_allow_html=True)
+
         st.session_state.clarification_answers = answers
 
         if st.button("Generate story + AC + Gherkin →", type="primary", use_container_width=True):
             client = get_client()
-            block = "\n\n".join(
-                f"Q: {q}\nA: {a or '(no answer - make a sensible assumption and surface under Assumptions)'}"
-                for q, a in answers.items()
-            )
+            def _fmt_answer(q, rec):
+                if not isinstance(rec, dict):
+                    return f"Q: {q}\nA: {rec or '(no answer - assume and surface under Assumptions)'}"
+                ans = rec.get("answer") or "(no answer - assume and surface under Assumptions)"
+                src_kind = rec.get("source", "custom")
+                meta = rec.get("candidate_meta") or {}
+                norm = meta.get("industry_norm", "")
+                if src_kind == "ai_candidate":
+                    return (
+                        f"Q: {q}\nA: {ans}\n"
+                        f"Source: AI-suggested candidate (industry_norm={norm})\n"
+                        f"Rationale: {meta.get('rationale','')}\n"
+                        f"Tradeoff locked in: {meta.get('tradeoff','')}\n"
+                        f"Assumption: {meta.get('assumption','')}"
+                    )
+                return f"Q: {q}\nA: {ans}\nSource: PO free-text override"
+
+            block = "\n\n".join(_fmt_answer(q, a) for q, a in answers.items())
             user_message = (
                 f"Original requirement:\n{st.session_state.raw_requirement}\n\n"
                 f"INVEST critique noted:\n"
