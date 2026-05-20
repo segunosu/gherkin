@@ -56,6 +56,11 @@ def init_state():
         "final_artifacts": None,
         "clarification_answers": {},
         "model": "gpt-5.5",
+        "project_context": None,
+        "saved_projects": [],
+        "test_plan": None,
+        "test_engine": "Claude (via prompt)",
+        "current_user": None,
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
@@ -1213,8 +1218,8 @@ def page_start():
             progress.empty()
             st.error(f"Failed: {e}")
 
-    if st.session_state.project_context:
-        ctx = st.session_state.project_context
+    if st.session_state.get('project_context'):
+        ctx = st.session_state.get('project_context') or {}
         st.markdown(
             f'<div class="ts-card" style="margin:16px 0;">'
             f'<div class="ts-card-title">Project context loaded</div>'
@@ -1292,8 +1297,8 @@ def page_add():
             progress.empty()
             st.error(f"Failed: {e}")
 
-    if st.session_state.project_context:
-        ctx = st.session_state.project_context
+    if st.session_state.get('project_context'):
+        ctx = st.session_state.get('project_context') or {}
         st.markdown(
             f'<div class="ts-card" style="margin:16px 0;">'
             f'<div class="ts-card-title">Project context loaded</div>'
