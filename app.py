@@ -203,6 +203,9 @@ hr { border-color: var(--border) !important; }
 
 
 def render_theme():
+    if st.session_state.get("_injected_theme") == st.session_state.theme:
+        return
+    st.session_state["_injected_theme"] = st.session_state.theme
     palette = DARK_PALETTE if st.session_state.theme == "dark" else LIGHT_PALETTE
     css_body = ":root {\n" + palette + "\n    --radius: 6px;\n    --radius-lg: 10px;\n}\n" + CSS_RULES_TEMPLATE
     import json as _json
@@ -387,16 +390,27 @@ def get_client():
     return OpenAI(api_key=api_key)
 
 
-def call_openai_structured(client, system_prompt, user_message, schema):
-    response = client.chat.completions.create(
-        model=st.session_state.model,
+def call_openai_structured(client, system_prompt, user_message, schema, *, model=None, status_placeholder=None):
+    model_name = model or st.session_state.get("model", "gpt-5.5")
+    stream = client.chat.completions.create(
+        model=model_name,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ],
         response_format={"type": "json_schema", "json_schema": schema},
+        stream=True,
     )
-    return json.loads(response.choices[0].message.content)
+    chunks = []
+    cc = 0
+    for event in stream:
+        d = (event.choices[0].delta.content or "") if event.choices else ""
+        if not d: continue
+        chunks.append(d); cc += len(d)
+        if status_placeholder is not None and cc % 120 < len(d):
+            status_placeholder.caption(f"⏳ {model_name} • {cc:,} chars received…")
+    if status_placeholder is not None: status_placeholder.empty()
+    return json.loads("".join(chunks))
 
 
 def verdict_pill(verdict: str) -> str:
@@ -485,15 +499,6 @@ def stage_header(num: str, title: str):
 def page_workbench():
     render_topbar("workbench")
 
-    with st.expander("⚙ Settings"):
-        st.session_state.model = st.selectbox(
-            "Model",
-            ["gpt-5.5", "gpt-5.4-mini"],
-            index=["gpt-5.5", "gpt-5.4-mini"].index(st.session_state.model),
-            help="GPT-5.5 = flagship quality. Mini = cheaper/faster.",
-        )
-        st.caption("OpenAI API key is read from the OPENAI_API_KEY environment variable.")
-
     stage_header("01", "Paste a raw business requirement")
     col_input, col_actions = st.columns([3, 1])
     with col_input:
@@ -515,18 +520,17 @@ def page_workbench():
 
     if run_invest:
         client = get_client()
-        with st.spinner("Critiquing against INVEST..."):
-            try:
-                st.session_state.invest_result = call_openai_structured(
-                    client,
-                    INVEST_SYSTEM_PROMPT,
-                    f"Critique this requirement:\n\n{st.session_state.raw_requirement}",
-                    INVEST_SCHEMA,
-                )
-                st.session_state.final_artifacts = None
-                st.session_state.clarification_answers = {}
-            except Exception as e:
-                st.error(f"OpenAI call failed: {e}")
+        progress = st.empty(); progress.caption("⏳ Critiquing against INVEST…")
+        try:
+            st.session_state.invest_result = call_openai_structured(
+                client, INVEST_SYSTEM_PROMPT,
+                f"Critique this requirement:\n\n{st.session_state.raw_requirement}",
+                INVEST_SCHEMA, model="gpt-5.4-mini", status_placeholder=progress,
+            )
+            st.session_state.final_artifacts = None
+            st.session_state.clarification_answers = {}
+        except Exception as e:
+            progress.empty(); st.error(f"OpenAI call failed: {e}")
 
     if st.session_state.invest_result:
         result = st.session_state.invest_result
@@ -595,13 +599,14 @@ def page_workbench():
                 f"SME clarifications:\n{block}\n\n"
                 f"Now produce the implementation-ready artifact set."
             )
-            with st.spinner("Generating story, acceptance criteria and Gherkin..."):
-                try:
-                    st.session_state.final_artifacts = call_openai_structured(
-                        client, GENERATE_SYSTEM_PROMPT, user_message, GENERATE_SCHEMA
-                    )
-                except Exception as e:
-                    st.error(f"OpenAI call failed: {e}")
+            progress = st.empty(); progress.caption("⏳ Generating story, acceptance criteria and Gherkin…")
+            try:
+                st.session_state.final_artifacts = call_openai_structured(
+                    client, GENERATE_SYSTEM_PROMPT, user_message, GENERATE_SCHEMA,
+                    model="gpt-5.5", status_placeholder=progress,
+                )
+            except Exception as e:
+                progress.empty(); st.error(f"OpenAI call failed: {e}")
 
     if st.session_state.final_artifacts:
         a = st.session_state.final_artifacts
