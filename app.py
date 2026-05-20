@@ -768,6 +768,18 @@ cp.addEventListener('click',()=>{navigator.clipboard.writeText(out.textContent.t
         }
 
         answers = {}
+        # Defensive: stale invest_result from before schema change may be list of strings.
+        if result["clarifying_questions"] and isinstance(result["clarifying_questions"][0], str):
+            st.warning("Old-schema data detected. Click ▶ Run INVEST critique above to refresh with candidate answers.")
+            answers = {}
+            for i, q_str in enumerate(result["clarifying_questions"]):
+                prior = st.session_state.clarification_answers.get(q_str, "")
+                if isinstance(prior, dict):
+                    prior = prior.get("answer", "")
+                answers[q_str] = st.text_area(f"**Q{i + 1}.** {q_str}", value=prior, key=f"clar_legacy_{i}", height=70)
+            st.session_state.clarification_answers = answers
+            return  # Skip the new-format loop entirely
+
         for i, q_obj in enumerate(result["clarifying_questions"]):
             q_text = q_obj["question"]
             candidates = q_obj["candidate_answers"]
