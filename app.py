@@ -195,7 +195,16 @@ textarea:focus, input:focus { border-color: var(--primary) !important; box-shado
 .stTabs [aria-selected="true"] { color: var(--fg-strong) !important; border-bottom: 2px solid var(--primary) !important; }
 
 [data-testid="stExpander"] { background: var(--card) !important; border: 1px solid var(--border) !important; border-radius: var(--radius) !important; }
-[data-testid="stExpander"] summary { color: var(--fg-strong) !important; }
+[data-testid="stExpander"] details { background: var(--card) !important; }
+[data-testid="stExpander"] details > summary,
+[data-testid="stExpander"] summary,
+[data-testid="stExpander"] [data-testid="stExpanderToggleIcon"] { background: var(--card) !important; color: var(--fg-strong) !important; }
+[data-testid="stExpander"] summary p,
+[data-testid="stExpander"] summary span,
+[data-testid="stExpander"] summary div { color: var(--fg-strong) !important; }
+[data-testid="stExpander"] > div { background: var(--card) !important; }
+[data-testid="stExpanderDetails"] { background: var(--card) !important; }
+[data-testid="stExpanderToggleIcon"] svg { fill: var(--fg-strong) !important; color: var(--fg-strong) !important; }
 
 .stCodeBlock, pre { background: var(--card-2) !important; border: 1px solid var(--border) !important; border-radius: var(--radius) !important; }
 .stCodeBlock code, pre code { color: var(--fg) !important; }
@@ -300,6 +309,8 @@ Then generate clarifying questions the PO should put to the SME. Be specific - v
       * assumption: what this answer takes for granted about the domain or data
       * downstream_impact: which specific AC field, Gherkin scenario, or traceability item this answer will set
       * industry_norm: "standard" (TPR/equivalent-regulator default), "common" (frequent variant), or "non_standard" (deliberate departure)
+
+IMPORTANT: clarifying_questions MUST be an array of objects (each with question/why_it_matters/candidate_answers), NEVER an array of strings.
 
 CROSS-QUESTION CONSISTENCY: rank candidates so that the ordinally-first candidate of each question is mutually consistent across questions. If Q1's top candidate scopes the story narrowly (e.g. "eligible jobholders only"), then Q2's top candidate must NOT contradict it (e.g. would prefer "no postponement, defer to a separate story" over "use postponement window"). Flag any candidate that is inconsistent with the most-likely answers to earlier questions with its industry_norm set to "non_standard".
 
@@ -706,7 +717,7 @@ cp.addEventListener('click',()=>{navigator.clipboard.writeText(out.textContent.t
             st.session_state.invest_result = call_openai_structured(
                 client, INVEST_SYSTEM_PROMPT,
                 _with_project_context(f"Critique this requirement:\n\n{st.session_state.raw_requirement}"),
-                INVEST_SCHEMA, model="gpt-5.4-mini", status_placeholder=progress,
+                INVEST_SCHEMA, model="gpt-5.5", status_placeholder=progress,
             )
             st.session_state.final_artifacts = None
             st.session_state.clarification_answers = {}
