@@ -202,6 +202,16 @@ textarea:focus, input:focus { border-color: var(--primary) !important; box-shado
 
 [data-testid="stCaptionContainer"], .stCaption { color: var(--fg-muted) !important; }
 hr { border-color: var(--border) !important; }
+
+@media (max-width: 720px) {
+    .block-container { padding: 16px 16px 32px 16px !important; }
+    .ts-topbar { flex-direction: column; align-items: flex-start !important; gap: 12px; padding: 12px 0; }
+    .ts-topbar-left { flex-wrap: wrap; gap: 12px; }
+    .ts-hero-h1 { font-size: 36px !important; }
+    .ts-hero-body { font-size: 16px !important; }
+    .ts-card { padding: 16px !important; }
+    .criterion-grid { grid-template-columns: repeat(3, 1fr) !important; }
+}
 """
 
 
@@ -290,6 +300,8 @@ Then generate clarifying questions the PO should put to the SME. Be specific - v
       * assumption: what this answer takes for granted about the domain or data
       * downstream_impact: which specific AC field, Gherkin scenario, or traceability item this answer will set
       * industry_norm: "standard" (TPR/equivalent-regulator default), "common" (frequent variant), or "non_standard" (deliberate departure)
+
+CROSS-QUESTION CONSISTENCY: rank candidates so that the ordinally-first candidate of each question is mutually consistent across questions. If Q1's top candidate scopes the story narrowly (e.g. "eligible jobholders only"), then Q2's top candidate must NOT contradict it (e.g. would prefer "no postponement, defer to a separate story" over "use postponement window"). Flag any candidate that is inconsistent with the most-likely answers to earlier questions with its industry_norm set to "non_standard".
 
 If the story bundles multiple concerns, propose a split (separate stories named with crisp titles).
 
@@ -457,8 +469,15 @@ def page_intro():
             st.session_state.page = "workbench"
             st.rerun()
 
+    # Workspace link
+    ws_count = len(st.session_state.get("saved_projects", []))
+    ws_label = f"View workspace ({ws_count})" if ws_count else "View workspace"
+    if st.button(ws_label, key="intro_workspace_btn"):
+        st.session_state.page = "workspace"
+        st.rerun()
+
     # Three project-mode options below the hero
-    st.markdown("<div style='height:32px;'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:24px;'></div>", unsafe_allow_html=True)
     st.markdown('<h2 class="ts-section-h2">Or pick a project mode</h2>', unsafe_allow_html=True)
     st.markdown(
         '<p class="ts-section-sub">PROPOSE is the public demo path. START and ADD are private utilities '
@@ -590,6 +609,33 @@ def _with_project_context(user_msg):
 
 def page_workbench():
     render_topbar("workbench")
+
+    # Voice input via Web Speech API (browser-native, no API cost)
+    components.html(
+        """
+<div style='margin-bottom:6px;'>
+  <button id='mic-btn' style='background:#0080ff;color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px;'>🎤 Speak the requirement</button>
+  <span id='mic-status' style='margin-left:12px;color:#94a3b8;font-size:12px;'></span>
+  <div id='mic-out' style='margin-top:6px;padding:8px 10px;background:#11141d;border:1px solid #1f2330;border-radius:6px;color:#e1e7ef;min-height:36px;display:none;font-size:13px;'></div>
+  <button id='mic-copy' style='margin-top:6px;display:none;background:transparent;color:#0080ff;border:1px solid #1f2330;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px;'>Copy to clipboard</button>
+</div>
+<script>
+const btn=document.getElementById('mic-btn'),st=document.getElementById('mic-status'),
+out=document.getElementById('mic-out'),cp=document.getElementById('mic-copy');
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+if(!SR){btn.disabled=true;st.textContent='(browser does not support Web Speech)';}
+else{let recog=null,recording=false,full='';
+btn.addEventListener('click',()=>{if(!recording){recog=new SR();recog.continuous=true;recog.interimResults=true;recog.lang='en-GB';
+full='';out.style.display='block';out.textContent='';cp.style.display='none';
+recog.onresult=e=>{let interim='';for(let i=e.resultIndex;i<e.results.length;i++){const t=e.results[i][0].transcript;if(e.results[i].isFinal)full+=t+' ';else interim+=t;}out.textContent=full+interim;};
+recog.onerror=e=>{st.textContent='Error: '+e.error;};
+recog.onend=()=>{recording=false;btn.textContent='🎤 Speak the requirement';st.textContent='Done — copy then paste into the box below.';cp.style.display='inline-block';};
+recog.start();recording=true;btn.textContent='⏹ Stop';st.textContent='Listening…';}else{recog.stop();}});
+cp.addEventListener('click',()=>{navigator.clipboard.writeText(out.textContent.trim()).then(()=>{cp.textContent='✓ Copied';setTimeout(()=>cp.textContent='Copy to clipboard',1800);});});}
+</script>
+""",
+        height=170,
+    )
 
     stage_header("01", "Paste a raw business requirement")
     col_input, col_actions = st.columns([3, 1])
@@ -794,8 +840,8 @@ def page_workbench():
         a = st.session_state.final_artifacts
         stage_header("04", "Implementation-ready artifacts")
 
-        tab_story, tab_ac, tab_gherkin, tab_trace, tab_export = st.tabs(
-            ["User Story", "Acceptance Criteria", "Gherkin", "Traceability", "Export"]
+        tab_story, tab_ac, tab_gherkin, tab_trace, tab_test, tab_export = st.tabs(
+            ["User Story", "Acceptance Criteria", "Gherkin", "Traceability", "Test Plan", "Export"]
         )
         with tab_story:
             st.markdown(f"#### {a['story_title']}")
@@ -824,6 +870,61 @@ def page_workbench():
             st.markdown("**Linked downstream stories:**")
             for s in t["linked_stories"]:
                 st.markdown(f"- {s}")
+        with tab_test:
+            st.markdown("#### Test Plan")
+            st.caption(
+                "Generate a structured test plan from the Gherkin scenarios. Choose where the tests should run — "
+                "the plan adapts (assertions, fixtures, oracle choices) to the chosen engine."
+            )
+            engine = st.radio(
+                "Execution engine",
+                ["Claude (via prompt)", "OpenAI (via prompt)", "Manual (PO walks the team through)", "Replit + Cucumber", "Lovable preview"],
+                horizontal=False,
+                key="test_engine_radio",
+                index=0,
+            )
+            st.session_state["test_engine"] = engine
+
+            if st.button("Generate test plan", type="primary", key="gen_test_plan"):
+                client = get_client()
+                tp_progress = st.empty()
+                tp_progress.caption("⏳ Drafting test plan…")
+                tp_prompt = (
+                    "You are writing a test plan for an engineering team in a regulated domain. "
+                    "Given the Gherkin feature below and the chosen execution engine, produce a concise test plan in markdown with: "
+                    "(1) Coverage matrix (which scenario tests which rule), "
+                    "(2) Engine-specific notes (fixtures, oracle, data needs) for the chosen engine, "
+                    "(3) Risks & gaps the scenarios don\'t cover, "
+                    "(4) Suggested next test additions ranked by risk. Be terse, structured, audit-friendly."
+                )
+                tp_user = (
+                    f"Engine: {engine}\n\nGherkin feature:\n{a['gherkin_feature']}\n\n"
+                    f"Acceptance criteria (for context):\n" + "\n".join(f"- {c}" for c in a["acceptance_criteria"])
+                )
+                try:
+                    r = client.chat.completions.create(
+                        model="gpt-5.4-mini",
+                        messages=[{"role": "system", "content": tp_prompt}, {"role": "user", "content": _with_project_context(tp_user)}],
+                        stream=True,
+                    )
+                    chunks = []
+                    cc = 0
+                    for ev in r:
+                        d = (ev.choices[0].delta.content or "") if ev.choices else ""
+                        if d:
+                            chunks.append(d); cc += len(d)
+                            if cc % 120 < len(d):
+                                tp_progress.caption(f"⏳ gpt-5.4-mini • {cc:,} chars received…")
+                    tp_progress.empty()
+                    st.session_state["test_plan"] = "".join(chunks)
+                except Exception as e:  # noqa: BLE001
+                    tp_progress.empty()
+                    st.error(f"Test plan generation failed: {e}")
+
+            if st.session_state.get("test_plan"):
+                st.markdown("---")
+                st.markdown(st.session_state.get("test_plan", ""))
+
         with tab_export:
             ac_md = "\n".join([f"- {c}" for c in a["acceptance_criteria"]])
             assumptions_md = "\n".join([f"- {x}" for x in a["assumptions"]]) or "_None_"
@@ -988,6 +1089,12 @@ def page_start():
             github_put_file(owner, nm, "features/.gitkeep", "", "chore: features placeholder")
 
             st.session_state.project_context = {"owner": owner, "name": nm, "url": url, **project}
+            # Track in backlog
+            entry = {"owner": owner, "name": nm, "url": url, "domain": project.get("domain", "")}
+            sp = st.session_state.saved_projects
+            sp = [e for e in sp if e.get("url") != url]
+            sp.insert(0, entry)
+            st.session_state.saved_projects = sp[:20]
             progress.empty()
             st.success(f"✓ Repo created: {url}")
         except Exception as e:  # noqa: BLE001
@@ -1063,6 +1170,11 @@ def page_add():
                 st.stop()
             project = json.loads(content)
             st.session_state.project_context = {"owner": owner, "name": name, "url": f"https://github.com/{owner}/{name}", **project}
+            entry = {"owner": owner, "name": name, "url": f"https://github.com/{owner}/{name}", "domain": project.get("domain", "")}
+            sp = st.session_state.saved_projects
+            sp = [e for e in sp if e.get("url") != entry["url"]]
+            sp.insert(0, entry)
+            st.session_state.saved_projects = sp[:20]
             st.success(f"✓ Loaded: {project.get('name', name)}")
         except Exception as e:  # noqa: BLE001
             progress.empty()
@@ -1083,11 +1195,77 @@ def page_add():
 
 
 
+
+# ============================================================
+# Page: WORKSPACE — backlog of loaded projects
+# ============================================================
+def page_workspace():
+    render_topbar("workbench")
+    st.markdown('<h1 class="ts-hero-h1" style="font-size:36px;">Workspace</h1>', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="ts-hero-body">Recently loaded projects. Click any to swap context and jump to the workbench.</p>',
+        unsafe_allow_html=True,
+    )
+
+    projects = st.session_state.get("saved_projects", [])
+    if not projects:
+        st.info("No projects yet. Use START to create one, or ADD to load an existing GitHub repo.")
+        c1, c2, c3 = st.columns([1, 1, 5])
+        with c1:
+            if st.button("+ Start a project", type="primary", use_container_width=True):
+                st.session_state.page = "start"
+                st.rerun()
+        with c2:
+            if st.button("Load via URL", use_container_width=True):
+                st.session_state.page = "add"
+                st.rerun()
+        with c3:
+            if st.button("← Back to intro", key="ws_back_empty"):
+                st.session_state.page = "intro"
+                st.rerun()
+        return
+
+    cols = st.columns(2)
+    for i, p in enumerate(projects):
+        col = cols[i % 2]
+        with col:
+            st.markdown(
+                f'<div class="ts-card" style="margin-bottom:12px;">'
+                f'<div class="ts-card-title">{p.get("name", "(unnamed)")}</div>'
+                f'<div class="ts-card-body" style="margin-bottom:8px;">'
+                f'<em>Domain:</em> {p.get("domain") or "(none)"}<br>'
+                f'<a href="{p.get("url", "#")}" target="_blank" style="color:var(--primary);font-size:12px;">{p.get("url", "")}</a>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
+            if st.button(f"Load \u2192", key=f"ws_load_{i}", use_container_width=True):
+                # Re-load from GitHub to ensure freshness
+                owner, name = p.get("owner"), p.get("name")
+                content = github_get_file(owner, name, "context/project.json")
+                if content:
+                    proj = json.loads(content)
+                    st.session_state.project_context = {"owner": owner, "name": name, "url": p.get("url"), **proj}
+                    st.session_state.page = "workbench"
+                    st.rerun()
+                else:
+                    st.error(f"Couldn't reload context/project.json for {owner}/{name}.")
+
+    st.markdown("<div style='margin-top:24px;'></div>", unsafe_allow_html=True)
+    cb1, cb2 = st.columns([1, 5])
+    with cb1:
+        if st.button("← Back to intro", key="ws_back"):
+            st.session_state.page = "intro"
+            st.rerun()
+
+
+
 if st.session_state.page == "intro":
     page_intro()
 elif st.session_state.page == "start":
     page_start()
 elif st.session_state.page == "add":
     page_add()
+elif st.session_state.page == "workspace":
+    page_workspace()
 else:
     page_workbench()
