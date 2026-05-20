@@ -1088,6 +1088,49 @@ def page_start():
 
             github_put_file(owner, nm, "features/.gitkeep", "", "chore: features placeholder")
 
+            # Auto-generate an advisory architecture-suggestion.md for the engineering team.
+            # Non-fatal — failure here does not block repo creation.
+            try:
+                progress.caption("⏳ Drafting architecture-suggestion.md (advisory)…")
+                arch_client = get_client()
+                arch_system = (
+                    "You are writing an ADVISORY architecture suggestion for the engineering team that will "
+                    "pick up this newly-created project. The reader is an engineer, not a PO. Write a concise "
+                    "markdown document (~400 words) covering: (1) data-model sketch (key entities and "
+                    "relationships derived from the domain and glossary), (2) API shape suggestion (REST/RPC, "
+                    "key endpoints), (3) hosting + DB defaults that fit the chosen runtime, (4) regulatory-"
+                    "driven constraints inferred from the regulatory references (auditability, data residency, "
+                    "retention, immutability where relevant), (5) integration touchpoints, (6) one explicit "
+                    "domain-relevant risk callout. End with a 'Caveats' line explicitly stating this is an "
+                    "AI-generated starting point the engineering team should challenge."
+                )
+                arch_user = (
+                    f"Project: {nm}\n"
+                    f"Domain: {domain.strip()}\n"
+                    f"Regulatory references:\n{regulatory.strip()}\n"
+                    f"Glossary terms:\n{glossary.strip()}\n"
+                    f"Stakeholders: {stakeholders.strip()}\n"
+                    f"Success metric: {success_metric.strip()}\n"
+                    f"Chosen runtime: {runtime}\n"
+                )
+                arch_resp = arch_client.chat.completions.create(
+                    model="gpt-5.4-mini",
+                    messages=[
+                        {"role": "system", "content": arch_system},
+                        {"role": "user", "content": arch_user},
+                    ],
+                )
+                arch_md = arch_resp.choices[0].message.content or ""
+                if arch_md.strip():
+                    github_put_file(
+                        owner, nm,
+                        "docs/architecture-suggestion.md",
+                        arch_md,
+                        "chore: AI advisory architecture suggestion",
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+
             st.session_state.project_context = {"owner": owner, "name": nm, "url": url, **project}
             # Track in backlog
             entry = {"owner": owner, "name": nm, "url": url, "domain": project.get("domain", "")}
