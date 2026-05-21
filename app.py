@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import re
+import uuid
 
 import requests
 import streamlit as st
@@ -528,11 +529,17 @@ def page_intro():
             st.rerun()
 
     # Workspace link
-    ws_count = len(st.session_state.get("saved_projects", []))
-    ws_label = f"View workspace ({ws_count})" if ws_count else "View workspace"
-    if st.button(ws_label, key="intro_workspace_btn"):
-        st.session_state.page = "workspace"
-        st.rerun()
+    nav_extra = st.columns([1.4, 1.6, 5])
+    with nav_extra[0]:
+        ws_count = len(st.session_state.get("saved_projects", []))
+        ws_label = f"View workspace ({ws_count})" if ws_count else "View workspace"
+        if st.button(ws_label, key="intro_workspace_btn", use_container_width=True):
+            st.session_state.page = "workspace"
+            st.rerun()
+    with nav_extra[1]:
+        if st.button("Product backlog board", key="intro_board_btn", use_container_width=True):
+            st.session_state.page = "board"
+            st.rerun()
 
     # Three project-mode options below the hero
     st.markdown("<div style='height:24px;'></div>", unsafe_allow_html=True)
@@ -1020,6 +1027,24 @@ cp.addEventListener('click',()=>{navigator.clipboard.writeText(out.textContent.t
             )
             st.code(export_md, language="markdown")
             st.caption("Copy-paste ready for Jira / Azure DevOps / Confluence / Notion.")
+
+            st.markdown("---")
+            ab1, ab2, _ = st.columns([1.7, 1.3, 3])
+            with ab1:
+                if st.button("+ Add to product backlog", type="primary", key="add_to_board"):
+                    pc = st.session_state.get("project_context") or {}
+                    card = card_from_artifacts(
+                        a,
+                        created_by=st.session_state.get("current_user") or "demo",
+                        repo_url=pc.get("url"),
+                    )
+                    _board_save(card)
+                    st.session_state["_board_msgs"] = [f"Added {card['title']} to the board."]
+                    st.success("Added to the product backlog board.")
+            with ab2:
+                if st.button("Open board", key="export_open_board"):
+                    st.session_state.page = "board"
+                    st.rerun()
 
 
 # ============================================================
@@ -1591,6 +1616,367 @@ def page_admin():
         st.rerun()
 
 
+# ============================================================
+# Product backlog board — persistent Kanban + GitHub status sync
+# Tenancy-lite: every card is scoped to a project so separate hobby
+# projects keep separate boards. GitHub is the queue + audit trail.
+# ============================================================
+BOARD_COLUMNS = [
+    ("backlog", "Backlog"),
+    ("ready", "Ready"),
+    ("doing", "Doing"),
+    ("done", "Done"),
+]
+_BOARD_PREFIX = "board:card:"
+READY_LABEL = "gherkin:ready"
+
+
+def _project_scope():
+    """Which board are we looking at? A loaded GitHub project, else a personal board."""
+    pc = st.session_state.get("project_context") or {}
+    if pc.get("owner") and pc.get("name"):
+        return f"{pc['owner']}/{pc['name']}"
+    cu = st.session_state.get("current_user") or "demo"
+    return f"user:{cu}"
+
+
+def _board_card_key(cid):
+    return f"{_BOARD_PREFIX}{cid}"
+
+
+def _board_save(card):
+    card["updated_at"] = _dt.utcnow().isoformat()
+    _user_db[_board_card_key(card["id"])] = json.dumps(card) if _USE_REPLIT_DB else card
+
+
+def _board_get(cid):
+    raw = _user_db.get(_board_card_key(cid))
+    if not raw:
+        return None
+    if isinstance(raw, (str, bytes)):
+        try:
+            return json.loads(raw)
+        except Exception:  # noqa: BLE001
+            return None
+    return dict(raw)
+
+
+def _board_cards(scope=None):
+    scope = scope or _project_scope()
+    cards = []
+    for k in list(_user_db.keys()):
+        ks = str(k)
+        if ks.startswith(_BOARD_PREFIX):
+            c = _board_get(ks[len(_BOARD_PREFIX):])
+            if c and c.get("scope") == scope and c.get("status") != "archived":
+                cards.append(c)
+    cards.sort(key=lambda c: c.get("created_at", ""), reverse=True)
+    return cards
+
+
+def _slugify(text, maxlen=48):
+    s = re.sub(r"[^a-zA-Z0-9]+", "-", (text or "").strip().lower()).strip("-")
+    return (s[:maxlen].strip("-")) or "feature"
+
+
+def _artifacts_to_spec_md(a):
+    ac_md = "\n".join(f"- {c}" for c in a.get("acceptance_criteria", []))
+    assumptions_md = "\n".join(f"- {x}" for x in a.get("assumptions", [])) or "_None_"
+    oos_md = "\n".join(f"- {x}" for x in a.get("out_of_scope", [])) or "_None_"
+    t = a.get("traceability", {}) or {}
+    linked_md = "\n".join(f"  - {s}" for s in t.get("linked_stories", [])) or "  - _None_"
+    us = a.get("user_story", {}) or {}
+    return (
+        f"# {a.get('story_title', 'Untitled story')}\n\n"
+        f"**As** {us.get('as_a', '')}\n"
+        f"**I need to** {us.get('i_need_to', '')}\n"
+        f"**So that** {us.get('so_that', '')}\n\n"
+        f"## Acceptance criteria\n{ac_md}\n\n"
+        f"## Assumptions\n{assumptions_md}\n\n"
+        f"## Out of scope (split into separate stories)\n{oos_md}\n\n"
+        f"## Gherkin\n```gherkin\n{a.get('gherkin_feature', '')}\n```\n\n"
+        f"## Traceability\n"
+        f"- Originating regulation: {t.get('originating_regulation', '')}\n"
+        f"- Regulator guidance: {t.get('regulator_guidance', '')}\n"
+        f"- Reference data version: {t.get('reference_data_version', '')}\n"
+        f"- Linked downstream stories:\n{linked_md}\n"
+    )
+
+
+def card_from_artifacts(a, *, created_by, scope=None, repo_url=None):
+    cid = uuid.uuid4().hex[:10]
+    parsed = _parse_repo_url(repo_url) if repo_url else None
+    now = _dt.utcnow().isoformat()
+    return {
+        "id": cid,
+        "scope": scope or _project_scope(),
+        "title": a.get("story_title", "Untitled story"),
+        "status": "backlog",
+        "spec_md": _artifacts_to_spec_md(a),
+        "gherkin_feature": a.get("gherkin_feature", ""),
+        "acceptance_criteria": a.get("acceptance_criteria", []),
+        "repo_url": repo_url,
+        "owner": parsed[0] if parsed else None,
+        "repo": parsed[1] if parsed else None,
+        "feature_path": None,
+        "commit_sha": None,
+        "issue_number": None,
+        "issue_url": None,
+        "status_check": None,
+        "synced_at": None,
+        "created_by": created_by,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+# ---- GitHub queue helpers (issue = work item, .feature = spec, commit status = gate) ----
+def _gh_get_sha(owner, repo, path):
+    r = requests.get(f"{GH_API}/repos/{owner}/{repo}/contents/{path}", headers=_gh_headers(), timeout=15)
+    if r.status_code == 200:
+        try:
+            return r.json().get("sha")
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def _gh_upsert_file(owner, repo, path, content, message):
+    payload = {"message": message, "content": base64.b64encode((content or "").encode("utf-8")).decode("ascii")}
+    sha = _gh_get_sha(owner, repo, path)
+    if sha:
+        payload["sha"] = sha
+    r = requests.put(f"{GH_API}/repos/{owner}/{repo}/contents/{path}", headers=_gh_headers(), json=payload, timeout=25)
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"Commit {path} failed ({r.status_code}): {r.text[:200]}")
+    return (r.json().get("commit", {}) or {}).get("sha")
+
+
+def _gh_create_issue(owner, repo, title, body, labels):
+    r = requests.post(f"{GH_API}/repos/{owner}/{repo}/issues", headers=_gh_headers(),
+                      json={"title": title, "body": body, "labels": labels}, timeout=25)
+    if r.status_code in (200, 201):
+        d = r.json()
+        return d.get("number"), d.get("html_url")
+    raise RuntimeError(f"Create issue failed ({r.status_code}): {r.text[:200]}")
+
+
+def _gh_set_issue_state(owner, repo, number, state):
+    r = requests.patch(f"{GH_API}/repos/{owner}/{repo}/issues/{number}", headers=_gh_headers(),
+                       json={"state": state}, timeout=20)
+    return r.status_code == 200
+
+
+def _gh_commit_state(owner, repo, ref):
+    r = requests.get(f"{GH_API}/repos/{owner}/{repo}/commits/{ref}/status", headers=_gh_headers(), timeout=15)
+    if r.status_code == 200:
+        d = r.json()
+        return d.get("state"), d.get("total_count", 0)
+    return None, 0
+
+
+def _board_publish(card):
+    """Publish a card to the GitHub queue: commit the .feature + spec, open a ready-labelled issue."""
+    if not _github_token():
+        return ["No GITHUB_TOKEN — card moved locally; GitHub publish/sync disabled."]
+    if not (card.get("owner") and card.get("repo")):
+        return ["No repo attached — moved locally. Attach a GitHub repo on the card to publish to the queue."]
+    owner, repo = card["owner"], card["repo"]
+    slug = _slugify(card["title"])
+    feat_path = f"features/{slug}-{card['id']}.feature"
+    spec_path = f"features/{slug}-{card['id']}.md"
+    notes = []
+    try:
+        sha = _gh_upsert_file(owner, repo, feat_path, card.get("gherkin_feature", ""),
+                              f"gherkin: scenarios for {card['title']}")
+        _gh_upsert_file(owner, repo, spec_path, card.get("spec_md", ""),
+                        f"gherkin: spec for {card['title']}")
+        card["feature_path"] = feat_path
+        card["commit_sha"] = sha
+        notes.append(f"Committed {feat_path}")
+    except Exception as e:  # noqa: BLE001
+        return [f"Commit failed: {e}"]
+    if card.get("issue_number"):
+        _gh_set_issue_state(owner, repo, card["issue_number"], "open")
+        notes.append(f"Re-opened issue #{card['issue_number']}")
+    else:
+        ac = "\n".join(f"- [ ] {c}" for c in card.get("acceptance_criteria", [])) or "- [ ] (none specified)"
+        body = (f"Auto-published from the Gherkin board.\n\n"
+                f"**Scenarios:** `{feat_path}`  \n**Spec:** `{spec_path}`\n\n"
+                f"### Acceptance criteria\n{ac}\n\n"
+                f"---\n_When the scenarios pass, this issue closes and the board card moves to Done._")
+        try:
+            num, url = _gh_create_issue(owner, repo, f"[gherkin] {card['title']}", body, [READY_LABEL])
+            card["issue_number"], card["issue_url"] = num, url
+            notes.append(f"Opened issue #{num} ({READY_LABEL})")
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"Issue create failed: {e}")
+    card["status_check"] = "pending"
+    card["synced_at"] = _dt.utcnow().isoformat()
+    return notes
+
+
+def _board_poll(card):
+    """Check the commit status; advance a card to Done if the gate is green."""
+    if not (_github_token() and card.get("owner") and card.get("repo") and card.get("commit_sha")):
+        return None
+    state, total = _gh_commit_state(card["owner"], card["repo"], card["commit_sha"])
+    if state is None:
+        return None
+    card["status_check"] = "none" if total == 0 else state
+    if total == 0:
+        return "No status checks on the commit yet (no CI wired up)."
+    if state == "success" and card.get("status") in ("ready", "doing"):
+        card["status"] = "done"
+        if card.get("issue_number"):
+            _gh_set_issue_state(card["owner"], card["repo"], card["issue_number"], "closed")
+        return "Gate green -> moved to Done, issue closed."
+    return f"Gate: {state}."
+
+
+def _board_apply_status(card, new_status):
+    old = card.get("status")
+    card["status"] = new_status
+    notes = []
+    have_gh = bool(card.get("owner") and card.get("repo") and _github_token())
+    if new_status == "ready" and old != "ready":
+        notes += _board_publish(card)
+    elif new_status == "done" and have_gh and card.get("issue_number"):
+        _gh_set_issue_state(card["owner"], card["repo"], card["issue_number"], "closed")
+        notes.append(f"Closed issue #{card['issue_number']}")
+    elif old == "done" and new_status != "done" and have_gh and card.get("issue_number"):
+        _gh_set_issue_state(card["owner"], card["repo"], card["issue_number"], "open")
+        notes.append(f"Re-opened issue #{card['issue_number']}")
+    _board_save(card)
+    return notes
+
+
+def _status_badge(c):
+    sc = c.get("status_check")
+    if not sc:
+        return ""
+    m = {"success": ("v-pass", "tests ok"), "failure": ("v-fail", "tests x"),
+         "pending": ("v-partial", "tests ..."), "none": ("v-partial", "no CI")}
+    cls, txt = m.get(sc, ("v-partial", str(sc)))
+    return f'<span class="v-pill {cls}" style="font-size:9px;">{txt}</span>'
+
+
+def _render_board_card(c, order, can_edit):
+    badge = _status_badge(c)
+    issue = ""
+    if c.get("issue_url"):
+        issue = (f' &middot; <a href="{c["issue_url"]}" target="_blank" '
+                 f'style="color:var(--primary);font-size:11px;">#{c.get("issue_number")}</a>')
+    st.markdown(
+        f'<div class="ts-card" style="padding:12px;margin-bottom:8px;">'
+        f'<div style="font-size:13px;font-weight:600;color:var(--fg-strong);line-height:1.35;">{c["title"]}</div>'
+        f'<div style="margin-top:6px;">{badge}{issue}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    with st.expander("details"):
+        st.markdown(f"**Repo:** {c.get('repo_url') or '_none attached_'}")
+        if can_edit:
+            new_url = st.text_input("GitHub repo URL", value=c.get("repo_url") or "",
+                                    key=f"repo_{c['id']}", placeholder="https://github.com/you/project")
+            if st.button("Save repo", key=f"saverepo_{c['id']}"):
+                parsed = _parse_repo_url(new_url) if new_url else None
+                c["repo_url"] = new_url or None
+                c["owner"] = parsed[0] if parsed else None
+                c["repo"] = parsed[1] if parsed else None
+                _board_save(c)
+                st.rerun()
+        if c.get("acceptance_criteria"):
+            st.markdown("**Acceptance criteria**")
+            for ac in c.get("acceptance_criteria", []):
+                st.markdown(f"- {ac}")
+        if c.get("gherkin_feature"):
+            st.code(c["gherkin_feature"], language="gherkin")
+        if c.get("feature_path"):
+            st.caption(f"queued at {c['feature_path']}")
+        if can_edit:
+            idx = order.index(c["status"]) if c.get("status") in order else 0
+            labels = dict(BOARD_COLUMNS)
+            if idx > 0 and st.button("Move to " + labels[order[idx - 1]], key=f"left_{c['id']}"):
+                st.session_state["_board_msgs"] = _board_apply_status(c, order[idx - 1])
+                st.rerun()
+            if idx < len(order) - 1 and st.button("Move to " + labels[order[idx + 1]], key=f"right_{c['id']}"):
+                st.session_state["_board_msgs"] = _board_apply_status(c, order[idx + 1])
+                st.rerun()
+            if st.button("Archive", key=f"arch_{c['id']}"):
+                c["status"] = "archived"
+                _board_save(c)
+                st.rerun()
+        else:
+            st.caption("Sign in (approved) to move or publish cards.")
+
+
+def page_board():
+    render_topbar("workbench")
+    scope = _project_scope()
+    pretty = scope.replace("user:", "personal - ")
+    st.markdown('<h1 class="ts-hero-h1" style="font-size:36px;">Product backlog board</h1>', unsafe_allow_html=True)
+    st.markdown(
+        f'<p class="ts-hero-body">Persistent board for <strong>{pretty}</strong>. '
+        'Cards flow Backlog -> Ready -> Doing -> Done. Marking a card <em>Ready</em> publishes its '
+        'scenarios + a <code>gherkin:ready</code> issue to GitHub - the queue a scheduled routine picks up.</p>',
+        unsafe_allow_html=True,
+    )
+
+    cu = st.session_state.get("current_user")
+    can_edit = _is_approved(cu)
+
+    ctrl = st.columns([1.1, 1.6, 1.4, 4])
+    with ctrl[0]:
+        if st.button("Back to intro", key="board_back"):
+            st.session_state.page = "intro"
+            st.rerun()
+    with ctrl[1]:
+        if can_edit and st.button("Sync from GitHub", key="board_sync"):
+            msgs = []
+            for c in _board_cards(scope):
+                if c.get("status") in ("ready", "doing"):
+                    m = _board_poll(c)
+                    if m:
+                        _board_save(c)
+                        msgs.append(f"{c['title']}: {m}")
+            st.session_state["_board_msgs"] = msgs or ["Nothing to sync."]
+            st.rerun()
+    with ctrl[2]:
+        if not can_edit:
+            if st.button("Sign in", key="board_signin"):
+                st.session_state.page = "login"
+                st.rerun()
+
+    for m in st.session_state.pop("_board_msgs", []):
+        st.caption("- " + m)
+
+    if not _github_token():
+        st.info("GITHUB_TOKEN not set - cards persist and move locally, but GitHub publish/sync is off.")
+
+    cards = _board_cards(scope)
+    if not cards:
+        st.info("No cards yet. Generate artifacts in the workbench, then click Add to product backlog.")
+        if st.button("Open workbench", key="board_to_wb", type="primary"):
+            st.session_state.page = "workbench"
+            st.rerun()
+        return
+
+    cols = st.columns(len(BOARD_COLUMNS))
+    order = [k for k, _ in BOARD_COLUMNS]
+    for ci, (status_key, label) in enumerate(BOARD_COLUMNS):
+        with cols[ci]:
+            col_cards = [c for c in cards if c.get("status") == status_key]
+            st.markdown(
+                f'<div style="font-weight:700;color:var(--fg-strong);border-bottom:2px solid var(--primary);'
+                f'padding-bottom:6px;margin-bottom:12px;">{label} '
+                f'<span style="color:var(--fg-muted);font-weight:500;">{len(col_cards)}</span></div>',
+                unsafe_allow_html=True,
+            )
+            for c in col_cards:
+                _render_board_card(c, order, can_edit)
+
+
 
 if st.session_state.page == "intro":
     page_intro()
@@ -1606,5 +1992,7 @@ elif st.session_state.page == "login":
     page_login()
 elif st.session_state.page == "admin":
     page_admin()
+elif st.session_state.page == "board":
+    page_board()
 else:
     page_workbench()
