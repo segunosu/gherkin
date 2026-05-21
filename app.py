@@ -933,18 +933,35 @@ cp.addEventListener('click',()=>{navigator.clipboard.writeText(out.textContent.t
                 f"SME clarifications:\n{block}\n\n"
                 f"Now produce the implementation-ready artifact set."
             )
-            progress = st.empty(); progress.caption("⏳ Generating story, acceptance criteria and Gherkin…")
+            progress = st.empty(); progress.caption("⏳ Generating story, AC and Gherkin… gpt-5.5 reasons for ~15-20s before output streams, then writes the full feature (usually 45-60s total). A live character count appears below once it starts.")
             try:
                 st.session_state.final_artifacts = call_openai_structured(
                     client, GENERATE_SYSTEM_PROMPT, user_message, GENERATE_SCHEMA,
                     model="gpt-5.5", status_placeholder=progress,
                 )
+                st.session_state["scroll_to_artifacts"] = True
             except Exception as e:
                 progress.empty(); st.error(f"OpenAI call failed: {e}")
 
     if st.session_state.final_artifacts:
         a = st.session_state.final_artifacts
         stage_header("04", "Implementation-ready artifacts")
+
+        # Auto-scroll to the freshly generated artifacts (once, not on later tab clicks)
+        if st.session_state.get("scroll_to_artifacts"):
+            st.session_state["scroll_to_artifacts"] = False
+            components.html(
+                '<script>(function(){'
+                'const p = window.parent.document; let n = 0;'
+                'const iv = setInterval(function(){'
+                'const ts = p.querySelectorAll(".ts-stage-title");'
+                'for (const t of ts){ if (t.textContent.trim() === "Implementation-ready artifacts"){'
+                't.scrollIntoView({behavior:"smooth", block:"start"}); clearInterval(iv); return; } }'
+                'if (++n > 20) clearInterval(iv);'
+                '}, 100);'
+                '})();</script>',
+                height=0, width=0,
+            )
 
         tab_story, tab_ac, tab_gherkin, tab_trace, tab_test, tab_export = st.tabs(
             ["User Story", "Acceptance Criteria", "Gherkin", "Traceability", "Test Plan", "Export"]
