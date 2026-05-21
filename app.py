@@ -1110,19 +1110,36 @@ cp.addEventListener('click',()=>{navigator.clipboard.writeText(out.textContent.t
             st.caption("Copy-paste ready for Jira / Azure DevOps / Confluence / Notion.")
 
             st.markdown("---")
-            ab1, ab2, _ = st.columns([1.7, 1.3, 3])
+            _splits = _split_titles(a)
+            _pc = st.session_state.get("project_context") or {}
+            _repo_url = _pc.get("url")
+            _author = st.session_state.get("current_user") or "demo"
+            if _splits:
+                st.caption(
+                    f"INVEST split detected: this story + {len(_splits)} split-off "
+                    f"stor{'y' if len(_splits) == 1 else 'ies'}. Add them all so the whole "
+                    "decomposition is tracked, not just this subset."
+                )
+            ab1, ab2, ab3 = st.columns([1.8, 2.4, 1.6])
             with ab1:
-                if st.button("+ Add to product backlog", type="primary", key="add_to_board"):
-                    pc = st.session_state.get("project_context") or {}
-                    card = card_from_artifacts(
-                        a,
-                        created_by=st.session_state.get("current_user") or "demo",
-                        repo_url=pc.get("url"),
-                    )
+                if st.button("+ Add story only", type="primary", key="add_to_board"):
+                    card = card_from_artifacts(a, created_by=_author, repo_url=_repo_url)
                     _board_save(card)
                     st.session_state["_board_msgs"] = [f"Added {card['title']} to the board."]
                     st.success("Added to the product backlog board.")
             with ab2:
+                if _splits and st.button(f"+ Add story + {len(_splits)} split-offs", key="add_with_splits"):
+                    card = card_from_artifacts(a, created_by=_author, repo_url=_repo_url)
+                    _board_save(card)
+                    made = 0
+                    for _t in _splits:
+                        _board_save(child_card_from_title(_t, parent=card, created_by=_author, repo_url=_repo_url))
+                        made += 1
+                    st.session_state["_board_msgs"] = [
+                        f"Added {card['title']} + {made} split-off stories (each needs a PROPOSE pass) to the board."
+                    ]
+                    st.success(f"Added the story and {made} split-off stories to the board.")
+            with ab3:
                 if st.button("Open board", key="export_open_board"):
                     st.session_state.page = "board"
                     st.rerun()
@@ -1811,6 +1828,57 @@ def card_from_artifacts(a, *, created_by, scope=None, repo_url=None):
     }
 
 
+def _split_titles(a):
+    """Unique, ordered list of split-off story titles from a critique/artifact."""
+    t = (a.get("traceability", {}) or {})
+    raw = list(a.get("out_of_scope", []) or []) + list(t.get("linked_stories", []) or [])
+    seen, out = set(), []
+    for x in raw:
+        title = re.sub(r"^\s*\[?STORY\]?[:\-\s]*", "", (x or "").strip(), flags=re.I).strip()
+        key = title.lower()
+        if title and key not in seen:
+            seen.add(key)
+            out.append(title)
+    return out
+
+
+def child_card_from_title(title, *, parent, created_by, scope=None, repo_url=None):
+    """A backlog stub card for a split-off story, linked to its parent.
+
+    Stubs carry no Gherkin yet (they need their own PROPOSE pass), so they are
+    tracked on the board but cannot be marked Ready until refined.
+    """
+    cid = uuid.uuid4().hex[:10]
+    parsed = _parse_repo_url(repo_url) if repo_url else None
+    now = _dt.utcnow().isoformat()
+    title = (title or "").strip()[:140]
+    return {
+        "id": cid,
+        "scope": scope or _project_scope(),
+        "title": title,
+        "status": "backlog",
+        "spec_md": (f"# {title}\n\n_Split off from **{parent.get('title', '')}** by the INVEST critique. "
+                    "Open this card in PROPOSE to produce acceptance criteria + Gherkin before marking it Ready._\n"),
+        "gherkin_feature": "",
+        "acceptance_criteria": [],
+        "repo_url": repo_url,
+        "owner": parsed[0] if parsed else None,
+        "repo": parsed[1] if parsed else None,
+        "feature_path": None,
+        "commit_sha": None,
+        "issue_number": None,
+        "issue_url": None,
+        "status_check": None,
+        "synced_at": None,
+        "parent_id": parent.get("id"),
+        "parent_title": parent.get("title"),
+        "needs_refinement": True,
+        "created_by": created_by,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
 # ---- GitHub queue helpers (issue = work item, .feature = spec, commit status = gate) ----
 def _gh_get_sha(owner, repo, path):
     r = requests.get(f"{GH_API}/repos/{owner}/{repo}/contents/{path}", headers=_gh_headers(), timeout=15)
@@ -1918,29 +1986,91 @@ def _board_publish(card):
     return notes
 
 
+def _gh_find_loop_pr(owner, repo, issue_number):
+    """Find the delivery-loop PR for an issue (head branch gherkin-loop/issue-N).
+
+    Returns (pr_number, pr_url, head_sha) or (None, None, None). Uses the pulls
+    API (PR read) so it works with the standard delivery-loop token scope.
+    """
+    branch = f"gherkin-loop/issue-{issue_number}"
+    try:
+        r = requests.get(f"{GH_API}/repos/{owner}/{repo}/pulls",
+                         headers=_gh_headers(),
+                         params={"state": "all", "head": f"{owner}:{branch}", "per_page": 5},
+                         timeout=15)
+        prs = r.json() if r.status_code == 200 else []
+        if not isinstance(prs, list) or not prs:
+            # Fallback: scan recent PRs for the head branch.
+            r = requests.get(f"{GH_API}/repos/{owner}/{repo}/pulls",
+                             headers=_gh_headers(), params={"state": "all", "per_page": 50}, timeout=15)
+            prs = [p for p in (r.json() if r.status_code == 200 else [])
+                   if isinstance(p, dict) and (p.get("head") or {}).get("ref") == branch]
+        if prs:
+            p = prs[0]
+            return p.get("number"), p.get("html_url"), (p.get("head") or {}).get("sha")
+    except Exception:  # noqa: BLE001
+        pass
+    return None, None, None
+
+
+def _gh_latest_run_conclusion(owner, repo, sha):
+    """Return (status, conclusion) of the latest GitHub Actions run for a commit.
+
+    Uses the Actions API (actions:read), so no Checks/Statuses scope is needed.
+    """
+    try:
+        r = requests.get(f"{GH_API}/repos/{owner}/{repo}/actions/runs",
+                         headers=_gh_headers(), params={"head_sha": sha, "per_page": 1}, timeout=15)
+        if r.status_code != 200:
+            return None, None
+        runs = (r.json() or {}).get("workflow_runs", [])
+        if not runs:
+            return None, None
+        return runs[0].get("status"), runs[0].get("conclusion")
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
 def _board_poll(card):
-    """Check the commit status; advance a card to Done if the gate is green."""
-    if not (_github_token() and card.get("owner") and card.get("repo") and card.get("commit_sha")):
+    """Reflect the implementation PR's CI state onto the card (via the Actions API).
+
+    Looks up the delivery-loop PR for the card's issue, reads the latest workflow
+    run on the PR head, and maps it to the card's status badge. Does NOT auto-move
+    to Done on green: merging a draft PR is a human step (attended).
+    """
+    if not (_github_token() and card.get("owner") and card.get("repo") and card.get("issue_number")):
         return None
-    state, total = _gh_commit_state(card["owner"], card["repo"], card["commit_sha"])
-    if state is None:
-        return None
-    card["status_check"] = "none" if total == 0 else state
-    if total == 0:
-        return "No status checks on the commit yet (no CI wired up)."
-    if state == "success" and card.get("status") in ("ready", "doing"):
-        card["status"] = "done"
-        if card.get("issue_number"):
-            _gh_set_issue_state(card["owner"], card["repo"], card["issue_number"], "closed")
-        return "Gate green -> moved to Done, issue closed."
-    return f"Gate: {state}."
+    owner, repo, n = card["owner"], card["repo"], card["issue_number"]
+    pr_num, pr_url, head_sha = _gh_find_loop_pr(owner, repo, n)
+    if pr_num:
+        card["pr_number"], card["pr_url"] = pr_num, pr_url
+        if card.get("status") == "ready":
+            card["status"] = "doing"  # a PR exists -> work is in progress
+    if not head_sha:
+        card["status_check"] = "none"
+        return f"No implementation PR yet for issue #{n} (awaiting the delivery-loop routine)."
+    status, conclusion = _gh_latest_run_conclusion(owner, repo, head_sha)
+    if status is None:
+        card["status_check"] = "none"
+        return f"PR #{pr_num} open; no CI run found yet."
+    if status != "completed":
+        card["status_check"] = "pending"
+        return f"PR #{pr_num}: tests {status}."
+    if conclusion == "success":
+        card["status_check"] = "success"
+        return f"PR #{pr_num}: tests passing."
+    card["status_check"] = "failure"
+    return f"PR #{pr_num}: tests {conclusion}."
 
 
 def _board_apply_status(card, new_status):
     old = card.get("status")
+    have_gh = bool(card.get("owner") and card.get("repo") and _github_token())
+    # Guard: a split-off stub with no Gherkin yet cannot be published to the queue.
+    if new_status == "ready" and old != "ready" and not (card.get("gherkin_feature") or "").strip():
+        return ["No Gherkin yet - open this split-off story in PROPOSE to produce AC + scenarios before marking it Ready."]
     card["status"] = new_status
     notes = []
-    have_gh = bool(card.get("owner") and card.get("repo") and _github_token())
     if new_status == "ready" and old != "ready":
         notes += _board_publish(card)
     elif new_status == "done" and have_gh and card.get("issue_number"):
@@ -1965,14 +2095,25 @@ def _status_badge(c):
 
 def _render_board_card(c, order, can_edit):
     badge = _status_badge(c)
-    issue = ""
+    links = ""
     if c.get("issue_url"):
-        issue = (f' &middot; <a href="{c["issue_url"]}" target="_blank" '
-                 f'style="color:var(--primary);font-size:11px;">#{c.get("issue_number")}</a>')
+        links += (f' &middot; <a href="{c["issue_url"]}" target="_blank" '
+                  f'style="color:var(--primary);font-size:11px;">#{c.get("issue_number")}</a>')
+    if c.get("pr_url"):
+        links += (f' &middot; <a href="{c["pr_url"]}" target="_blank" '
+                  f'style="color:var(--primary);font-size:11px;">PR #{c.get("pr_number")}</a>')
+    refine = ""
+    if c.get("needs_refinement") or not (c.get("gherkin_feature") or "").strip():
+        refine = '<span class="v-pill v-partial" style="font-size:9px;">needs refinement</span> '
+    parent = ""
+    if c.get("parent_title"):
+        parent = (f'<div style="margin-top:5px;font-size:10px;color:var(--fg-muted);">'
+                  f'↳ split from: {c["parent_title"]}</div>')
     st.markdown(
         f'<div class="ts-card" style="padding:12px;margin-bottom:8px;">'
         f'<div style="font-size:13px;font-weight:600;color:var(--fg-strong);line-height:1.35;">{c["title"]}</div>'
-        f'<div style="margin-top:6px;">{badge}{issue}</div>'
+        f'<div style="margin-top:6px;">{refine}{badge}{links}</div>'
+        f'{parent}'
         f'</div>',
         unsafe_allow_html=True,
     )
