@@ -348,7 +348,34 @@ INVEST_SCHEMA = {
                 },
             },
             "domain_ambiguities": {"type": "array", "items": {"type": "string"}},
-            "clarifying_questions": {"type": "array", "items": {"type": "string"}},
+            "clarifying_questions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string"},
+                        "why_it_matters": {"type": "string"},
+                        "candidate_answers": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "answer": {"type": "string"},
+                                    "rationale": {"type": "string"},
+                                    "tradeoff": {"type": "string"},
+                                    "assumption": {"type": "string"},
+                                    "downstream_impact": {"type": "string"},
+                                    "industry_norm": {"type": "string", "enum": ["standard", "common", "non_standard"]},
+                                },
+                                "required": ["answer", "rationale", "tradeoff", "assumption", "downstream_impact", "industry_norm"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    },
+                    "required": ["question", "why_it_matters", "candidate_answers"],
+                    "additionalProperties": False,
+                },
+            },
             "split_recommendation": {"type": "string"},
             "overall_verdict": {"type": "string", "enum": ["READY", "NEEDS_CLARIFICATION", "REJECT"]},
         },
