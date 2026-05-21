@@ -20,6 +20,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 from openai import OpenAI
 
+# Single knob for the OpenAI model used across the app. gpt-5.4-mini ($0.75/$4.50
+# per 1M tokens) is ~6-7x cheaper and faster than gpt-5.5 ($5/$30) while still
+# handling INVEST critique, clarifications, Gherkin generation and test plans.
+# Tune here: "gpt-5.5" for max quality, "gpt-5.4-nano" ($0.20/$1.25) for cheapest.
+OPENAI_MODEL = "gpt-5.4-mini"
+
 
 st.set_page_config(
     page_title="INVEST -> Gherkin - Teamsmiths AI",
@@ -56,7 +62,7 @@ def init_state():
         "invest_result": None,
         "final_artifacts": None,
         "clarification_answers": {},
-        "model": "gpt-5.5",
+        "model": OPENAI_MODEL,
         "project_context": None,
         "saved_projects": [],
         "test_plan": None,
@@ -458,7 +464,7 @@ def get_client():
 
 
 def call_openai_structured(client, system_prompt, user_message, schema, *, model=None, status_placeholder=None):
-    model_name = model or st.session_state.get("model", "gpt-5.5")
+    model_name = model or st.session_state.get("model", OPENAI_MODEL)
     stream = client.chat.completions.create(
         model=model_name,
         messages=[
@@ -771,7 +777,7 @@ cp.addEventListener('click',()=>{navigator.clipboard.writeText(out.textContent.t
             st.session_state.invest_result = call_openai_structured(
                 client, INVEST_SYSTEM_PROMPT,
                 _with_project_context(f"Critique this requirement:\n\n{st.session_state.raw_requirement}"),
-                INVEST_SCHEMA, model="gpt-5.5", status_placeholder=progress,
+                INVEST_SCHEMA, model=OPENAI_MODEL, status_placeholder=progress,
             )
             st.session_state.final_artifacts = None
             st.session_state.clarification_answers = {}
@@ -956,7 +962,7 @@ cp.addEventListener('click',()=>{navigator.clipboard.writeText(out.textContent.t
                 try:
                     _artifacts = call_openai_structured(
                         client, GENERATE_SYSTEM_PROMPT, user_message, GENERATE_SCHEMA,
-                        model="gpt-5.5", status_placeholder=progress,
+                        model=OPENAI_MODEL, status_placeholder=progress,
                     )
                     break
                 except Exception as e:
@@ -1058,7 +1064,7 @@ cp.addEventListener('click',()=>{navigator.clipboard.writeText(out.textContent.t
                 )
                 try:
                     r = client.chat.completions.create(
-                        model="gpt-5.4-mini",
+                        model=OPENAI_MODEL,
                         messages=[{"role": "system", "content": tp_prompt}, {"role": "user", "content": _with_project_context(tp_user)}],
                         stream=True,
                     )
@@ -1288,7 +1294,7 @@ def page_start():
                     f"Chosen runtime: {runtime}\n"
                 )
                 arch_resp = arch_client.chat.completions.create(
-                    model="gpt-5.4-mini",
+                    model=OPENAI_MODEL,
                     messages=[
                         {"role": "system", "content": arch_system},
                         {"role": "user", "content": arch_user},
