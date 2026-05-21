@@ -470,14 +470,29 @@ def call_openai_structured(client, system_prompt, user_message, schema, *, model
     )
     chunks = []
     cc = 0
+    finish_reason = None
     for event in stream:
-        d = (event.choices[0].delta.content or "") if event.choices else ""
+        if not event.choices:
+            continue
+        choice = event.choices[0]
+        if getattr(choice, "finish_reason", None):
+            finish_reason = choice.finish_reason
+        d = choice.delta.content or ""
         if not d: continue
         chunks.append(d); cc += len(d)
         if status_placeholder is not None and cc % 120 < len(d):
             status_placeholder.caption(f"⏳ {model_name} • {cc:,} chars received…")
     if status_placeholder is not None: status_placeholder.empty()
-    return json.loads("".join(chunks))
+    raw = "".join(chunks).strip()
+    if not raw:
+        raise ValueError(f"The model returned no content (finish_reason={finish_reason}). Please try again.")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        hint = " The response appears truncated - please try again." if finish_reason == "length" else ""
+        raise ValueError(
+            f"Could not parse the model response (finish_reason={finish_reason}, {cc:,} chars received).{hint} [{e}]"
+        ) from e
 
 
 def verdict_pill(verdict: str) -> str:
@@ -934,14 +949,30 @@ cp.addEventListener('click',()=>{navigator.clipboard.writeText(out.textContent.t
                 f"Now produce the implementation-ready artifact set."
             )
             progress = st.empty(); progress.caption("⏳ Generating story, AC and Gherkin… gpt-5.5 reasons for ~15-20s before output streams, then writes the full feature (usually 45-60s total). A live character count appears below once it starts.")
-            try:
-                st.session_state.final_artifacts = call_openai_structured(
-                    client, GENERATE_SYSTEM_PROMPT, user_message, GENERATE_SCHEMA,
-                    model="gpt-5.5", status_placeholder=progress,
-                )
+            st.session_state["generate_error"] = None
+            _artifacts = None
+            _last_err = None
+            for _attempt in range(2):  # one automatic retry on a transient stream/parse failure
+                try:
+                    _artifacts = call_openai_structured(
+                        client, GENERATE_SYSTEM_PROMPT, user_message, GENERATE_SCHEMA,
+                        model="gpt-5.5", status_placeholder=progress,
+                    )
+                    break
+                except Exception as e:
+                    _last_err = e
+                    if _attempt == 0:
+                        progress.caption("⏳ First attempt did not return clean output - retrying once…")
+            progress.empty()
+            if _artifacts is not None:
+                st.session_state.final_artifacts = _artifacts
                 st.session_state["scroll_to_artifacts"] = True
-            except Exception as e:
-                progress.empty(); st.error(f"OpenAI call failed: {e}")
+            else:
+                st.session_state["generate_error"] = f"Generation did not complete: {_last_err}"
+
+    if st.session_state.get("generate_error"):
+        st.error(st.session_state["generate_error"])
+        st.caption("Tip: click Generate again - large requirements with many clarifications occasionally need a second pass.")
 
     if st.session_state.final_artifacts:
         a = st.session_state.final_artifacts
