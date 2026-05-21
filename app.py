@@ -1833,12 +1833,33 @@ def _gh_upsert_file(owner, repo, path, content, message):
     return (r.json().get("commit", {}) or {}).get("sha")
 
 
+def _gh_ensure_label(owner, repo, name):
+    """Create the label if it does not exist yet (so it can attach to an issue)."""
+    try:
+        requests.post(f"{GH_API}/repos/{owner}/{repo}/labels", headers=_gh_headers(),
+                      json={"name": name, "color": "0e8a16",
+                            "description": "Queued for the Gherkin delivery loop"}, timeout=20)
+    except Exception:  # noqa: BLE001 — already-exists / transient is fine
+        pass
+
+
 def _gh_create_issue(owner, repo, title, body, labels):
+    for _lb in labels:
+        _gh_ensure_label(owner, repo, _lb)
     r = requests.post(f"{GH_API}/repos/{owner}/{repo}/issues", headers=_gh_headers(),
                       json={"title": title, "body": body, "labels": labels}, timeout=25)
     if r.status_code in (200, 201):
         d = r.json()
-        return d.get("number"), d.get("html_url")
+        num = d.get("number")
+        # Belt-and-braces: ensure the labels actually attached (GitHub can drop
+        # an inline label that did not exist at create time).
+        if num and labels and not d.get("labels"):
+            try:
+                requests.post(f"{GH_API}/repos/{owner}/{repo}/issues/{num}/labels",
+                              headers=_gh_headers(), json={"labels": labels}, timeout=20)
+            except Exception:  # noqa: BLE001
+                pass
+        return num, d.get("html_url")
     raise RuntimeError(f"Create issue failed ({r.status_code}): {r.text[:200]}")
 
 
