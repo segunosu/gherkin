@@ -1852,7 +1852,11 @@ def _split_titles(a):
     raw = list(a.get("out_of_scope", []) or []) + list(t.get("linked_stories", []) or [])
     seen, out = set(), []
     for x in raw:
-        title = re.sub(r"^\s*\[?STORY\]?[:\-\s]*", "", (x or "").strip(), flags=re.I).strip()
+        title = (x or "").strip()
+        title = re.sub(r"^\s*\[?\s*story\s*\]?\s*[:\-\u2013\u2014]?\s*", "", title, flags=re.I)
+        # strip a leading list-number marker like "001]", "1.", "2)", "3 -", "01:" (a bare
+        # number with no terminator is left alone so titles like "2024 review" survive)
+        title = re.sub(r"^\s*#?\d{1,3}\s*[\]\.\):\-\u2013\u2014]\s*", "", title).strip()
         key = title.lower()
         if title and key not in seen:
             seen.add(key)
