@@ -1772,6 +1772,24 @@ def _board_cards(scope=None):
     return cards
 
 
+def _board_group_members(card):
+    """All cards in the same split-story group: the in-scope parent + its split-off children.
+
+    A standalone card returns just itself. Lets one repo (or status action) apply to the
+    whole decomposition instead of forcing the same input on every child.
+    """
+    root_id = card.get("parent_id") or card.get("id")
+    members, seen = [], set()
+    for c in _board_cards(card.get("scope")):
+        cid = c.get("id")
+        if (cid == root_id or c.get("parent_id") == root_id) and cid not in seen:
+            seen.add(cid)
+            members.append(c)
+    if card.get("id") not in seen:  # safety: always include the card itself
+        members.append(card)
+    return members
+
+
 def _slugify(text, maxlen=48):
     s = re.sub(r"[^a-zA-Z0-9]+", "-", (text or "").strip().lower()).strip("-")
     return (s[:maxlen].strip("-")) or "feature"
@@ -2122,12 +2140,20 @@ def _render_board_card(c, order, can_edit):
         if can_edit:
             new_url = st.text_input("GitHub repo URL", value=c.get("repo_url") or "",
                                     key=f"repo_{c['id']}", placeholder="https://github.com/you/project")
+            _group = _board_group_members(c)
+            if len(_group) > 1:
+                st.caption(f"One repo for the whole story - saving applies to this card + its {len(_group) - 1} split-off(s).")
             if st.button("Save repo", key=f"saverepo_{c['id']}"):
                 parsed = _parse_repo_url(new_url) if new_url else None
-                c["repo_url"] = new_url or None
-                c["owner"] = parsed[0] if parsed else None
-                c["repo"] = parsed[1] if parsed else None
-                _board_save(c)
+                for _m in _group:
+                    _m["repo_url"] = new_url or None
+                    _m["owner"] = parsed[0] if parsed else None
+                    _m["repo"] = parsed[1] if parsed else None
+                    _board_save(_m)
+                st.session_state["_board_msgs"] = (
+                    [f"Repo applied to this story + {len(_group) - 1} split-off card(s)."]
+                    if len(_group) > 1 else ["Repo saved."]
+                )
                 st.rerun()
         if c.get("acceptance_criteria"):
             st.markdown("**Acceptance criteria**")
