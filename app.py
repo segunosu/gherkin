@@ -2138,22 +2138,33 @@ def _render_board_card(c, order, can_edit):
     with st.expander("details"):
         st.markdown(f"**Repo:** {c.get('repo_url') or '_none attached_'}")
         if can_edit:
-            new_url = st.text_input("GitHub repo URL", value=c.get("repo_url") or "",
-                                    key=f"repo_{c['id']}", placeholder="https://github.com/you/project")
+            _repo_now = c.get("repo_url") or ""
+            # Key includes the current URL so the field always reflects the card's real
+            # repo (Streamlit otherwise keeps a stale widget value after propagation).
+            new_url = st.text_input("GitHub repo URL", value=_repo_now,
+                                    key=f"repo_{c['id']}_{_repo_now or 'none'}",
+                                    placeholder="https://github.com/you/project")
             _group = _board_group_members(c)
             if len(_group) > 1:
-                st.caption(f"One repo for the whole story - saving applies to this card + its {len(_group) - 1} split-off(s).")
+                st.caption(f"One repo for the whole story - entering a URL applies it to this card + its {len(_group) - 1} split-off(s).")
             if st.button("Save repo", key=f"saverepo_{c['id']}"):
-                parsed = _parse_repo_url(new_url) if new_url else None
-                for _m in _group:
-                    _m["repo_url"] = new_url or None
-                    _m["owner"] = parsed[0] if parsed else None
-                    _m["repo"] = parsed[1] if parsed else None
-                    _board_save(_m)
-                st.session_state["_board_msgs"] = (
-                    [f"Repo applied to this story + {len(_group) - 1} split-off card(s)."]
-                    if len(_group) > 1 else ["Repo saved."]
-                )
+                _url = (new_url or "").strip()
+                parsed = _parse_repo_url(_url) if _url else None
+                if _url and not parsed:
+                    st.session_state["_board_msgs"] = ["Couldn't parse owner/name from that URL - nothing changed."]
+                elif not _url:
+                    # Empty save detaches THIS card only - never silently wipes the whole story.
+                    c["repo_url"] = None; c["owner"] = None; c["repo"] = None
+                    _board_save(c)
+                    st.session_state["_board_msgs"] = ["Repo detached from this card (siblings untouched)."]
+                else:
+                    for _m in _group:
+                        _m["repo_url"] = _url; _m["owner"] = parsed[0]; _m["repo"] = parsed[1]
+                        _board_save(_m)
+                    st.session_state["_board_msgs"] = (
+                        [f"Repo applied to this story + {len(_group) - 1} split-off card(s)."]
+                        if len(_group) > 1 else ["Repo saved."]
+                    )
                 st.rerun()
         if c.get("acceptance_criteria"):
             st.markdown("**Acceptance criteria**")
